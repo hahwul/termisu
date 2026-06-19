@@ -113,6 +113,13 @@ class Termisu::Input::Parser
   # Reads a complete UTF-8 character (1-4 bytes) starting from the given lead byte.
   # Consumes the additional continuation bytes from the reader.
   # Returns nil if incomplete, invalid, or not UTF-8 text.
+  #
+  # Note on Hangul/IME: This receives *committed* characters after IME composition
+  # completes (e.g. after typing jamo for a full syllable). Preedit/composing text
+  # during input is typically handled by the terminal emulator or OS IME overlay,
+  # not delivered as key events here. Full preedit support would require terminal-
+  # specific protocols (e.g. kitty's input protocol extensions or IM protocol).
+  # See related discussion in gori project.
   private def read_utf8_char(first_byte : UInt8) : Char?
     # ASCII fast path
     return first_byte.chr if first_byte < 0x80
