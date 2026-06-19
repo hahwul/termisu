@@ -107,6 +107,14 @@ class Termisu::Input::Parser
 
   @reader : Reader
   @protocol_active : Bool = false
+  # One-shot de-duplication guard. When a CSI-u event reports an associated
+  # text char, some terminals ALSO echo that same char as a raw UTF-8 byte
+  # (notably IME commits). We remember the just-emitted protocol char here so
+  # the immediately-following raw byte, IF it is the exact same char, can be
+  # swallowed as a duplicate. It is consumed (cleared) by the very next byte —
+  # so plain unmodified keys (which arrive as raw bytes under the 17u flag set,
+  # since report_all_keys is off) are never wrongly dropped.
+  @dup_guard : Char? = nil
 
   def initialize(@reader : Reader)
   end
@@ -178,6 +186,12 @@ class Termisu::Input::Parser
   # Also: Modifier keys alone (Ctrl, Alt, Shift) don't send any bytes in
   # standard terminal input. We can only detect them combined with other keys.
   private def parse_byte(byte : UInt8) : Event::Any
+    # Snapshot + clear the one-shot dup guard: it only matches a raw byte that
+    # arrives IMMEDIATELY after the CSI-u event that set it (handled in the
+    # printable branch below). Any other byte clears it. The escape branch may
+    # set a fresh guard for the *next* call.
+    dup = @dup_guard
+    @dup_guard = nil
     case byte
     when 0x1B # ESC - could be escape key or start of sequence
       parse_escape_sequence
@@ -197,15 +211,18 @@ class Termisu::Input::Parser
     when 0x7F # DEL (Backspace on most terminals)
       Event::Key.new(Key::Backspace)
     else
-      if @protocol_active
-        # With Kitty keyboard protocol + report_text active, text (including IME composed)
-        # is reported via CSI 27;...~ or CSI ... u (with text field). Ignore raw printable
-        # bytes to prevent duplicate input (English doubles, Hangul jamo split).
-        return Event::Key.new(Key::Unknown)
-      end
-      # Printable character - support full UTF-8 (Hangul, CJK, etc. for text input)
+      # Printable character - support full UTF-8 (Hangul, CJK, etc. for text input).
+      # Always read the full UTF-8 char first (so multibyte continuation bytes are
+      # consumed even when we end up discarding it — otherwise they'd be misparsed).
       c = read_utf8_char(byte)
       return Event::Key.new(Key::Unknown) unless c
+
+      # Under the Kitty protocol (report_text), plain unmodified keys still arrive
+      # as raw bytes (report_all_keys is off), so we must NOT blanket-drop them.
+      # Only swallow a raw byte that exactly duplicates the char just emitted by
+      # the immediately-preceding CSI-u text event (a terminal echoing an IME
+      # commit on both channels).
+      return Event::Key.new(Key::Unknown) if @protocol_active && dup == c
 
       key = Key.from_char(c) || Key::Unknown
       Event::Key.new(key, char: c)
@@ -354,6 +371,9 @@ class Termisu::Input::Parser
     end
 
     key = codepoint_to_key(codepoint)
+    # Arm the one-shot dup guard so a duplicate raw echo of this exact char
+    # (same byte immediately following) is swallowed; plain keys never match it.
+    @dup_guard = c if c && c.printable? && c.ord >= 32
     Event::Key.new(key, modifiers, char: c)
   end
 
@@ -367,9 +387,12 @@ class Termisu::Input::Parser
     key = codepoint_to_key(keycode)
     c = (keycode > 0 && keycode <= 0x10FFFF) ? (keycode.chr rescue nil) : nil
 
-    # If modify reports a printable via CSI, assume protocol for text; skip raw bytes to dedup.
+    # If modify reports a printable via CSI, the terminal is using the protocol
+    # for text; arm the one-shot dup guard so only a duplicate raw echo of this
+    # exact char is swallowed (plain raw keys keep flowing).
     if c && c.printable? && c.ord >= 32
       @protocol_active = true
+      @dup_guard = c
     end
 
     Event::Key.new(key, modifiers, char: c)

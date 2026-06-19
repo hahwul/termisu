@@ -584,3 +584,52 @@ describe Termisu::Input::Parser do
     end
   end
 end
+
+# Drives the parser over a single byte stream, polling `count` events. Used to
+# exercise the interaction between a Kitty CSI-u text report and the raw-byte
+# path that immediately follows it.
+private def parse_events(bytes : Bytes, count : Int32) : Array(Termisu::Event::Any?)
+  read_fd, write_fd = create_pipe
+  reader = nil
+  events = [] of Termisu::Event::Any?
+  begin
+    LibC.write(write_fd, bytes, bytes.size)
+    reader = Termisu::Reader.new(read_fd)
+    parser = Termisu::Input::Parser.new(reader)
+    count.times { events << parser.poll_event(100) }
+  ensure
+    reader.try(&.close)
+    LibC.close(read_fd)
+    LibC.close(write_fd)
+  end
+  events
+end
+
+describe Termisu::Input::Parser do
+  describe "Kitty report_text (CSI >17u) + raw printable bytes" do
+    # Under flags 17u (disambiguate + report_text, NO report_all_keys), modified
+    # keys arrive as CSI-u while plain unmodified keys still arrive as raw bytes.
+    # A text-bearing CSI-u event must NOT cause subsequent plain raw keys to be
+    # dropped — only an exact duplicate echo of that one char is a duplicate.
+    it "keeps plain raw keys typed after a CSI-u text event" do
+      # Shift+a -> 'A' (codepoint 97, shift mod 2, text 65), then raw "bc".
+      bytes = Bytes[0x1B, '['.ord, '9'.ord, '7'.ord, ';'.ord, '2'.ord, ';'.ord, '6'.ord, '5'.ord, 'u'.ord,
+        'b'.ord, 'c'.ord]
+      events = parse_events(bytes, 3)
+      events[0].as(Termisu::Event::Key).char.should eq('A')
+      events[1].as(Termisu::Event::Key).char.should eq('b')
+      events[2].as(Termisu::Event::Key).char.should eq('c')
+    end
+
+    it "drops only an exact duplicate raw echo of the CSI-u char" do
+      # CSI-u 'x' (codepoint 120, text 120), then raw 'x' (the echo), then raw 'y'.
+      bytes = Bytes[0x1B, '['.ord, '1'.ord, '2'.ord, '0'.ord, ';'.ord, '1'.ord, ';'.ord, '1'.ord, '2'.ord, '0'.ord, 'u'.ord,
+        'x'.ord, 'y'.ord]
+      events = parse_events(bytes, 3)
+      events[0].as(Termisu::Event::Key).char.should eq('x')
+      # the duplicate echo is swallowed (Unknown, no char)
+      events[1].as(Termisu::Event::Key).char.should be_nil
+      events[2].as(Termisu::Event::Key).char.should eq('y')
+    end
+  end
+end
