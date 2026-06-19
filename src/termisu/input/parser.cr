@@ -110,6 +110,40 @@ class Termisu::Input::Parser
   def initialize(@reader : Reader)
   end
 
+  # Reads a complete UTF-8 character (1-4 bytes) starting from the given lead byte.
+  # Consumes the additional continuation bytes from the reader.
+  # Returns nil if incomplete, invalid, or not UTF-8 text.
+  private def read_utf8_char(first_byte : UInt8) : Char?
+    # ASCII fast path
+    return first_byte.chr if first_byte < 0x80
+
+    # Number of continuation bytes from lead
+    ncont = case first_byte
+            when 0xC0..0xDF then 1
+            when 0xE0..0xEF then 2
+            when 0xF0..0xF7 then 3
+            else return nil
+            end
+
+    bytes = Bytes.new(1 + ncont)
+    bytes[0] = first_byte
+
+    ncont.times do |i|
+      b = @reader.read_byte
+      return nil unless b
+      # must be continuation 10xxxxxx
+      return nil unless (b & 0xC0) == 0x80
+      bytes[i + 1] = b
+    end
+
+    begin
+      s = String.new(bytes)
+      s.size > 0 ? s[0] : nil
+    rescue
+      nil
+    end
+  end
+
   # Polls for an input event with optional timeout.
   #
   # - `timeout_ms` - Timeout in milliseconds (-1 for blocking)
@@ -156,11 +190,15 @@ class Termisu::Input::Parser
     when 0x7F # DEL (Backspace on most terminals)
       Event::Key.new(Key::Backspace)
     else
-      # Printable character
-      key = Key.from_char(byte.chr)
-      Event::Key.new(key)
+      # Printable character - support full UTF-8 (Hangul, CJK, etc. for text input)
+      c = read_utf8_char(byte)
+      return Event::Key.new(Key::Unknown) unless c
+
+      key = Key.from_char(c) || Key::Unknown
+      Event::Key.new(key, char: c)
     end
   end
+
 
   # Parses an escape sequence starting with ESC (0x1B).
   private def parse_escape_sequence : Event::Any
@@ -182,12 +220,14 @@ class Termisu::Input::Parser
       @reader.read_byte # consume 'O'
       parse_ss3_sequence
     else
-      # Alt+key: \e followed by printable char
-      @reader.read_byte # consume the char
-      key = Key.from_char(byte.chr)
-      Event::Key.new(key, Modifier::Alt)
+      # Alt+key: \e followed by printable char (UTF-8 capable)
+      @reader.read_byte # consume the (first) char byte
+      c = read_utf8_char(byte)
+      key = c ? (Key.from_char(c) || Key::Unknown) : Key::Unknown
+      Event::Key.new(key, Modifier::Alt, char: c)
     end
   end
+
 
   # Parses a CSI sequence: \e[...
   #
@@ -279,11 +319,13 @@ class Termisu::Input::Parser
 
     modifiers = Modifier.from_xterm_code(mod_code)
 
-    # Convert codepoint to key
+    # Convert codepoint to key + attach printable char if applicable
     key = codepoint_to_key(codepoint)
+    c = (codepoint > 0 && codepoint <= 0x10FFFF) ? (codepoint.chr rescue nil) : nil
 
-    Event::Key.new(key, modifiers)
+    Event::Key.new(key, modifiers, char: c)
   end
+
 
   # Parses modifyOtherKeys sequence.
   # Format: CSI 27 ; modifier ; keycode ~
@@ -293,9 +335,15 @@ class Termisu::Input::Parser
 
     modifiers = Modifier.from_xterm_code(mod_code)
     key = codepoint_to_key(keycode)
+    c = (keycode > 0 && keycode <= 0x10FFFF) ? (keycode.chr rescue nil) : nil
 
-    Event::Key.new(key, modifiers)
+    Event::Key.new(key, modifiers, char: c)
   end
+```
+
+Now for the event/key.cr in the clone, apply the patch.
+
+First, read the clean version.
 
   # Kitty protocol codepoint to Key mapping for special keys.
   # These codepoints are specific to the Kitty keyboard protocol.
