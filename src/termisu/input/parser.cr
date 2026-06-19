@@ -110,6 +110,46 @@ class Termisu::Input::Parser
   def initialize(@reader : Reader)
   end
 
+  # Reads a complete UTF-8 character (1-4 bytes) starting from the given lead byte.
+  # Consumes the additional continuation bytes from the reader.
+  # Returns nil if incomplete, invalid, or not UTF-8 text.
+  #
+  # Note on Hangul/IME: This receives *committed* characters after IME composition
+  # completes (e.g. after typing jamo for a full syllable). Preedit/composing text
+  # during input is typically handled by the terminal emulator or OS IME overlay,
+  # not delivered as key events here. Full preedit support would require terminal-
+  # specific protocols (e.g. kitty's input protocol extensions or IM protocol).
+  private def read_utf8_char(first_byte : UInt8) : Char?
+    # ASCII fast path
+    return first_byte.chr if first_byte < 0x80
+
+    # Number of continuation bytes from lead
+    ncont = case first_byte
+            when 0xC0..0xDF then 1
+            when 0xE0..0xEF then 2
+            when 0xF0..0xF7 then 3
+            else                 return nil
+            end
+
+    bytes = Bytes.new(1 + ncont)
+    bytes[0] = first_byte
+
+    ncont.times do |i|
+      b = @reader.read_byte
+      return nil unless b
+      # must be continuation 10xxxxxx
+      return nil unless (b & 0xC0) == 0x80
+      bytes[i + 1] = b
+    end
+
+    begin
+      s = String.new(bytes)
+      s.size > 0 ? s[0] : nil
+    rescue
+      nil
+    end
+  end
+
   # Polls for an input event with optional timeout.
   #
   # - `timeout_ms` - Timeout in milliseconds (-1 for blocking)
@@ -156,9 +196,12 @@ class Termisu::Input::Parser
     when 0x7F # DEL (Backspace on most terminals)
       Event::Key.new(Key::Backspace)
     else
-      # Printable character
-      key = Key.from_char(byte.chr)
-      Event::Key.new(key)
+      # Printable character - support full UTF-8 (Hangul, CJK, etc. for text input)
+      c = read_utf8_char(byte)
+      return Event::Key.new(Key::Unknown) unless c
+
+      key = Key.from_char(c) || Key::Unknown
+      Event::Key.new(key, char: c)
     end
   end
 
@@ -182,10 +225,11 @@ class Termisu::Input::Parser
       @reader.read_byte # consume 'O'
       parse_ss3_sequence
     else
-      # Alt+key: \e followed by printable char
-      @reader.read_byte # consume the char
-      key = Key.from_char(byte.chr)
-      Event::Key.new(key, Modifier::Alt)
+      # Alt+key: \e followed by printable char (UTF-8 capable)
+      @reader.read_byte # consume the (first) char byte
+      c = read_utf8_char(byte)
+      key = c ? (Key.from_char(c) || Key::Unknown) : Key::Unknown
+      Event::Key.new(key, Modifier::Alt, char: c)
     end
   end
 
@@ -229,7 +273,8 @@ class Termisu::Input::Parser
 
   # Decodes a CSI sequence into a KeyEvent using hash lookups.
   # Handles standard CSI sequences, Kitty keyboard protocol, and modifyOtherKeys.
-  private def decode_csi_key(params : String, final : Char) : Event::Key
+  # Returns Any because kitty text events with codepoint 0 are emitted as Preedit.
+  private def decode_csi_key(params : String, final : Char) : Event::Any
     # Kitty keyboard protocol: CSI codepoint ; modifiers u
     # or: CSI codepoint ; modifiers : event_type u
     if final == 'u'
@@ -269,20 +314,33 @@ class Termisu::Input::Parser
   #
   # Codepoint is the Unicode codepoint of the key.
   # Modifiers use the same encoding as xterm (1 + shift + alt*2 + ctrl*4 + meta*8).
-  private def parse_kitty_key(params : String) : Event::Key
+  # With report_text, a 3rd field carries the produced text codepoints (prefer for .char).
+  private def parse_kitty_key(params : String) : Event::Any
     # Handle colon separator for event type (e.g., "97;5:1" for Ctrl+A press)
     clean_params = params.split(':').first || params
     parts = clean_params.split(';')
 
     codepoint = parts[0]?.try(&.to_i?) || 0
     mod_code = parts[1]?.try(&.to_i?) || 1
+    text_param = parts[2]?
 
     modifiers = Modifier.from_xterm_code(mod_code)
 
-    # Convert codepoint to key
-    key = codepoint_to_key(codepoint)
+    text_str = build_text_from_codepoints(text_param)
 
-    Event::Key.new(key, modifiers)
+    # Prefer associated text (report_text) for the actual inserted char (e.g. shift+a gives 'A' in text)
+    c = text_str[0]? || ((codepoint > 0 && codepoint <= 0x10FFFF) ? (codepoint.chr rescue nil) : nil)
+
+    if codepoint == 0 && !text_str.empty?
+      # Pure text event (no associated key), typically from IME or direct text input.
+      # Emit as Preedit so TUI can show composing state with underline (e.g. building Hangul jamo -> syllable).
+      # On commit, terminal should deliver the final syllable as a normal Key+char (or another report);
+      # consumers should clear preedit on the committed char Key and insert it.
+      return Event::Preedit.new(text_str)
+    end
+
+    key = codepoint_to_key(codepoint)
+    Event::Key.new(key, modifiers, char: c)
   end
 
   # Parses modifyOtherKeys sequence.
@@ -293,8 +351,15 @@ class Termisu::Input::Parser
 
     modifiers = Modifier.from_xterm_code(mod_code)
     key = codepoint_to_key(keycode)
+    c = (keycode > 0 && keycode <= 0x10FFFF) ? (keycode.chr rescue nil) : nil
 
-    Event::Key.new(key, modifiers)
+    Event::Key.new(key, modifiers, char: c)
+  end
+
+  private def build_text_from_codepoints(text_param : String?) : String
+    return "" if text_param.nil? || text_param.empty?
+    codes = text_param.split(':').compact_map(&.to_i?)
+    codes.map { |cp| (cp.chr rescue nil) }.compact.join
   end
 
   # Kitty protocol codepoint to Key mapping for special keys.
