@@ -633,3 +633,35 @@ describe Termisu::Input::Parser do
     end
   end
 end
+
+describe Termisu::Input::Parser do
+  describe "Kitty CSI-u text field parsing" do
+    it "keeps all codepoints of a multi-codepoint text field (no ':' truncation)" do
+      # CSI 0;1;4352:4449 u -> pure-text (preedit) event carrying two Hangul jamo.
+      bytes = Bytes[0x1B, '['.ord, '0'.ord, ';'.ord, '1'.ord, ';'.ord,
+        '4'.ord, '3'.ord, '5'.ord, '2'.ord, ':'.ord, '4'.ord, '4'.ord, '4'.ord, '9'.ord, 'u'.ord]
+      event = parse_sequence(bytes)
+      event.should be_a(Termisu::Event::Preedit)
+      event.as(Termisu::Event::Preedit).text.size.should eq(2)
+    end
+
+    it "emits Preedit with empty text for a codepoint-0 report with no text (preedit cleared)" do
+      # CSI 0;1 u -> terminal signalling composition cleared.
+      bytes = Bytes[0x1B, '['.ord, '0'.ord, ';'.ord, '1'.ord, 'u'.ord]
+      event = parse_sequence(bytes)
+      event.should be_a(Termisu::Event::Preedit)
+      event.as(Termisu::Event::Preedit).text.empty?.should be_true
+    end
+
+    it "parses an event-type in the modifier field without dropping the key" do
+      # CSI 97;5:1 u -> Ctrl+a press (mods=5, event_type=1); the ':' is the event type.
+      bytes = Bytes[0x1B, '['.ord, '9'.ord, '7'.ord, ';'.ord, '5'.ord, ':'.ord, '1'.ord, 'u'.ord]
+      event = parse_sequence(bytes)
+      event.should be_a(Termisu::Event::Key)
+      if event.is_a?(Termisu::Event::Key)
+        event.char.should eq('a')
+        event.modifiers.ctrl?.should be_true
+      end
+    end
+  end
+end

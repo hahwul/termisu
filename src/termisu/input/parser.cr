@@ -340,12 +340,16 @@ class Termisu::Input::Parser
   # Modifiers use the same encoding as xterm (1 + shift + alt*2 + ctrl*4 + meta*8).
   # With report_text, a 3rd field carries the produced text codepoints (prefer for .char).
   private def parse_kitty_key(params : String) : Event::Any
-    # Handle colon separator for event type (e.g., "97;5:1" for Ctrl+A press)
-    clean_params = params.split(':').first || params
-    parts = clean_params.split(';')
+    # Fields are ';'-separated: codepoint ; modifiers ; text. The ':' separator is
+    # used *within* fields — alternate keys in the codepoint field
+    # (unicode:shifted:base), an event type in the modifier field (mods:event_type),
+    # and MULTIPLE codepoints in the text field (cp1:cp2:...). Split on ';' first and
+    # strip ':' only from the codepoint/modifier fields; never from the text field,
+    # or multi-codepoint text (e.g. composed Hangul jamo) would be truncated.
+    parts = params.split(';')
 
-    codepoint = parts[0]?.try(&.to_i?) || 0
-    mod_code = parts[1]?.try(&.to_i?) || 1
+    codepoint = parts[0]?.try(&.split(':').first).try(&.to_i?) || 0
+    mod_code = parts[1]?.try(&.split(':').first).try(&.to_i?) || 1
     text_param = parts[2]?
 
     modifiers = Modifier.from_xterm_code(mod_code)
@@ -361,11 +365,13 @@ class Termisu::Input::Parser
       @protocol_active = true
     end
 
-    if codepoint == 0 && !text_str.empty?
+    if codepoint == 0
       # Pure text event (no associated key), typically from IME or direct text input.
-      # Emit as Preedit so TUI can show composing state with underline (e.g. building Hangul jamo -> syllable).
-      # On commit, terminal should deliver the final syllable as a normal Key+char (or another report);
-      # consumers should clear preedit on the committed char Key and insert it.
+      # Emit as Preedit so the TUI can show composing state with underline (e.g.
+      # building Hangul jamo -> syllable). An EMPTY text here is the terminal
+      # signalling "preedit cleared" — emit Preedit("") so consumers can clear stale
+      # composition UI, rather than dropping it as Key::Unknown. On commit the final
+      # syllable arrives as a normal Key+char (or another report).
       @protocol_active = true
       return Event::Preedit.new(text_str)
     end
