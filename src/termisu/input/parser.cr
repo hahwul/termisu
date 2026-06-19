@@ -106,6 +106,7 @@ class Termisu::Input::Parser
   }
 
   @reader : Reader
+  @protocol_active : Bool = false
 
   def initialize(@reader : Reader)
   end
@@ -196,6 +197,12 @@ class Termisu::Input::Parser
     when 0x7F # DEL (Backspace on most terminals)
       Event::Key.new(Key::Backspace)
     else
+      if @protocol_active
+        # With Kitty keyboard protocol + report_text active, text (including IME composed)
+        # is reported via CSI 27;...~ or CSI ... u (with text field). Ignore raw printable
+        # bytes to prevent duplicate input (English doubles, Hangul jamo split).
+        return Event::Key.new(Key::Unknown)
+      end
       # Printable character - support full UTF-8 (Hangul, CJK, etc. for text input)
       c = read_utf8_char(byte)
       return Event::Key.new(Key::Unknown) unless c
@@ -331,11 +338,18 @@ class Termisu::Input::Parser
     # Prefer associated text (report_text) for the actual inserted char (e.g. shift+a gives 'A' in text)
     c = text_str[0]? || ((codepoint > 0 && codepoint <= 0x10FFFF) ? (codepoint.chr rescue nil) : nil)
 
+    # If we saw a text-producing CSI report, terminal is using protocol for chars too (report_all+text or similar);
+    # skip raw byte path for printables from now to avoid duplicates.
+    if c && c.printable? && c.ord >= 32
+      @protocol_active = true
+    end
+
     if codepoint == 0 && !text_str.empty?
       # Pure text event (no associated key), typically from IME or direct text input.
       # Emit as Preedit so TUI can show composing state with underline (e.g. building Hangul jamo -> syllable).
       # On commit, terminal should deliver the final syllable as a normal Key+char (or another report);
       # consumers should clear preedit on the committed char Key and insert it.
+      @protocol_active = true
       return Event::Preedit.new(text_str)
     end
 
@@ -352,6 +366,11 @@ class Termisu::Input::Parser
     modifiers = Modifier.from_xterm_code(mod_code)
     key = codepoint_to_key(keycode)
     c = (keycode > 0 && keycode <= 0x10FFFF) ? (keycode.chr rescue nil) : nil
+
+    # If modify reports a printable via CSI, assume protocol for text; skip raw bytes to dedup.
+    if c && c.printable? && c.ord >= 32
+      @protocol_active = true
+    end
 
     Event::Key.new(key, modifiers, char: c)
   end
