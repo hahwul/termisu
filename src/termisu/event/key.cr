@@ -20,8 +20,14 @@ struct Termisu::Event::Key
   # Modifier keys held during the keypress.
   getter modifiers : Input::Modifier
 
-  def initialize(@key : Input::Key, @modifiers : Input::Modifier = Input::Modifier::None)
+  # The Unicode character for printable input (e.g. Hangul syllables, CJK,
+  # accented letters, etc.). This is set for direct UTF-8 input and takes
+  # precedence over key.to_char for text editing.
+  getter char : Char?
+
+  def initialize(@key : Input::Key, @modifiers : Input::Modifier = Input::Modifier::None, @char : Char? = nil)
   end
+
 
   # Returns true if Ctrl modifier was held.
   def ctrl? : Bool
@@ -64,9 +70,11 @@ struct Termisu::Event::Key
   end
 
   # Returns the character for this key, if printable.
+  # Prefers the explicitly attached @char (for full Unicode input).
   def char : Char?
-    key.to_char
+    @char || key.to_char
   end
+
 
   private def ctrl_plain_key?(& : Input::Key -> Bool) : Bool
     yield(key) && ctrl? && !alt? && !shift?
