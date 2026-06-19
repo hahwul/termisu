@@ -346,11 +346,7 @@ class Termisu::Input::Parser
 
     Event::Key.new(key, modifiers, char: c)
   end
-```
 
-Now for the event/key.cr in the clone, apply the patch.
-
-First, read the clean version.
 
   # Kitty protocol codepoint to Key mapping for special keys.
   # These codepoints are specific to the Kitty keyboard protocol.
