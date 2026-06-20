@@ -22,7 +22,14 @@ jobs:
         uses: actions/checkout@v6
       - name: Setup Crystal
         uses: ./.github/actions/setup-crystal
+      # Build and run the repo's own ameba (against the Crystal from
+      # setup-crystal) instead of crystal-ameba/github-action: that action's
+      # Docker image lags on an old Crystal whose formatter disagrees with ours,
+      # breaking the Lint/Formatting rule. Building here keeps CI in lockstep
+      # with local `bin/hace ameba`.
+      - name: Build Ameba
+        shell: bash
+        run: shards build ameba
       - name: Run Ameba
-        uses: crystal-ameba/github-action@v0.12.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: bin/ameba
