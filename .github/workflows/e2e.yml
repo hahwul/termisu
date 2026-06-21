@@ -83,7 +83,7 @@ jobs:
         with:
           node-version: "25.7.0"
       - name: Install JavaScript dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
       - name: Run E2E tests
         env:
           TUI_TEST_SHELL: ${{ matrix.shell }}
