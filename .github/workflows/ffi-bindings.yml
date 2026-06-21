@@ -114,7 +114,7 @@ jobs:
             echo "TERMISU_LIB_PATH=${GITHUB_WORKSPACE}/bin/libtermisu.dylib" >> "$GITHUB_ENV"
           fi
       - name: Install JavaScript dependencies
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Run TypeScript lint
         run: bun run js:lint
       - name: Run TypeScript format check

@@ -44,7 +44,7 @@ jobs:
         with:
           node-version: "25.7.0"
       - name: Install JavaScript dependencies
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Run Biome lint
         run: bun run e2e:lint
       - name: Run Biome format check

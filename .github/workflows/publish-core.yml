@@ -35,7 +35,7 @@ jobs:
       - name: Build native FFI library
         uses: ./.github/actions/build-ffi
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Set native library path
         run: echo "TERMISU_LIB_PATH=${GITHUB_WORKSPACE}/bin/libtermisu.so" >> "$GITHUB_ENV"
       - name: Typecheck @termisu/core
