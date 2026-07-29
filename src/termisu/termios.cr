@@ -97,10 +97,10 @@ class Termisu::Termios
     tios.c_lflag |= LibC::IEXTEN if mode.extended?
 
     # Input flags handling
-    apply_input_flags(tios, orig, mode)
+    tios = apply_input_flags(tios, orig, mode)
 
     # Output flags handling
-    apply_output_flags(tios, orig, mode)
+    tios = apply_output_flags(tios, orig, mode)
 
     # Control flags - 8-bit chars, no parity
     tios.c_cflag &= ~(LibC::CSIZE | LibC::PARENB)
@@ -141,9 +141,18 @@ class Termisu::Termios
     end
   end
 
-  # Applies input flags (c_iflag) based on mode.
+  # Applies input flags (c_iflag) based on mode, returning the updated attrs.
   # Handles IXON (flow control) and ICRNL (CR→NL translation).
-  private def apply_input_flags(tios : LibC::Termios, orig : LibC::Termios, mode : Terminal::Mode)
+  #
+  # RETURNS the struct rather than mutating the argument: `LibC::Termios` is a
+  # struct, so the parameter is a COPY and every assignment here was discarded on
+  # return. Only c_lflag/c_cflag/c_cc, mutated inline in `set_mode`, ever reached
+  # the terminal — which is why `current_mode` and ICANON/ECHO looked right while
+  # raw mode kept ICRNL, IXON and OPOST set, the opposite of the table in
+  # `Terminal::Mode`. With ICRNL on the line discipline rewrites every CR to NL
+  # before any read sees it, so a pasted CRLF arrives as two newlines; with IXON
+  # on, Ctrl+S freezes a full-screen application instead of arriving as a key.
+  private def apply_input_flags(tios : LibC::Termios, orig : LibC::Termios, mode : Terminal::Mode) : LibC::Termios
     if mode.canonical?
       # Start with original input flags for canonical mode
       tios.c_iflag = orig.c_iflag
@@ -165,11 +174,13 @@ class Termisu::Termios
       tios.c_iflag |= LibC::IXON if mode.flow_control?
       tios.c_iflag |= LibC::ICRNL if mode.cr_to_nl?
     end
+    tios
   end
 
-  # Applies output flags (c_oflag) based on mode.
+  # Applies output flags (c_oflag) based on mode, returning the updated attrs.
   # Handles OPOST (output processing) for NL→CRNL translation etc.
-  private def apply_output_flags(tios : LibC::Termios, orig : LibC::Termios, mode : Terminal::Mode)
+  # Returns rather than mutates — see `apply_input_flags`.
+  private def apply_output_flags(tios : LibC::Termios, orig : LibC::Termios, mode : Terminal::Mode) : LibC::Termios
     if mode.canonical?
       # Start with original output flags for canonical mode
       tios.c_oflag = orig.c_oflag
@@ -185,5 +196,6 @@ class Termisu::Termios
       # Apply explicit flag request
       tios.c_oflag |= LibC::OPOST if mode.output_processing?
     end
+    tios
   end
 end

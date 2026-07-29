@@ -138,4 +138,41 @@ describe Termisu::Termios do
       termios.try &.restore
     end
   end
+
+  # `apply_input_flags`/`apply_output_flags` take `LibC::Termios` — a STRUCT, so by value.
+  # Every c_iflag/c_oflag change they made was written to a copy and discarded, leaving raw
+  # mode with ICRNL, IXON and OPOST still on: a pasted CRLF arrived as two newlines and
+  # Ctrl+S froze the application. Only c_lflag/c_cflag/c_cc, mutated inline in `set_mode`,
+  # ever reached the terminal, so `Mode::CrToNl`, `Mode::FlowControl` and
+  # `Mode::OutputProcessing` had no effect either.
+  #
+  # Assert against the FD, not the tracked mode — `current_mode` was right the whole time,
+  # which is how every existing spec in this file passed against the broken code.
+  describe "raw mode input/output flags" do
+    it "clears CR→NL translation, flow control and output post-processing" do
+      pending! "needs a real tty" unless STDOUT.tty?
+      termios = Termisu::Termios.new(STDOUT.fd)
+      termios.enable_raw_mode
+
+      tios = uninitialized LibC::Termios
+      LibC.tcgetattr(STDOUT.fd, pointerof(tios)).should eq(0)
+      (tios.c_iflag & LibC::ICRNL).should eq(0)
+      (tios.c_iflag & LibC::IXON).should eq(0)
+      (tios.c_oflag & LibC::OPOST).should eq(0)
+    ensure
+      termios.try &.restore
+    end
+
+    it "honours a mode that asks for CR→NL back" do
+      pending! "needs a real tty" unless STDOUT.tty?
+      termios = Termisu::Termios.new(STDOUT.fd)
+      termios.set_mode(Termisu::Terminal::Mode::CrToNl)
+
+      tios = uninitialized LibC::Termios
+      LibC.tcgetattr(STDOUT.fd, pointerof(tios)).should eq(0)
+      (tios.c_iflag & LibC::ICRNL).should_not eq(0)
+    ensure
+      termios.try &.restore
+    end
+  end
 end
