@@ -666,6 +666,40 @@ describe Termisu::Input::Parser do
       events[1].as(Termisu::Event::Key).char.should be_nil
       events[2].as(Termisu::Event::Key).char.should eq('y')
     end
+
+    # A modified key arrives as CSI-u with an EMPTY text field, so `c` falls back
+    # to the codepoint and Ctrl+P yields c == 'p'. The terminal sends Ctrl+P as
+    # the control byte 0x10 and never as a raw 'p', so such a report must not arm
+    # the dup guard — otherwise it eats the next plain 'p' the user types.
+    it "keeps a plain key typed right after the same letter under Ctrl" do
+      # Ctrl+p -> CSI 112;5u (no text field), then raw "pet".
+      bytes = Bytes[0x1B, '['.ord, '1'.ord, '1'.ord, '2'.ord, ';'.ord, '5'.ord, 'u'.ord,
+        'p'.ord, 'e'.ord, 't'.ord]
+      events = parse_events(bytes, 4)
+      events[0].as(Termisu::Event::Key).modifiers.ctrl?.should be_true
+      events[1].as(Termisu::Event::Key).char.should eq('p')
+      events[2].as(Termisu::Event::Key).char.should eq('e')
+      events[3].as(Termisu::Event::Key).char.should eq('t')
+    end
+
+    it "keeps a plain key typed right after the same letter under Alt" do
+      # Alt+p -> CSI 112;3u, then raw 'p'.
+      bytes = Bytes[0x1B, '['.ord, '1'.ord, '1'.ord, '2'.ord, ';'.ord, '3'.ord, 'u'.ord,
+        'p'.ord]
+      events = parse_events(bytes, 2)
+      events[0].as(Termisu::Event::Key).modifiers.alt?.should be_true
+      events[1].as(Termisu::Event::Key).char.should eq('p')
+    end
+
+    it "keeps a plain key typed right after the same letter under modifyOtherKeys Ctrl" do
+      # Ctrl+p via modifyOtherKeys -> CSI 27;5;112~, then raw 'p'.
+      bytes = Bytes[0x1B, '['.ord, '2'.ord, '7'.ord, ';'.ord, '5'.ord, ';'.ord,
+        '1'.ord, '1'.ord, '2'.ord, '~'.ord,
+        'p'.ord]
+      events = parse_events(bytes, 2)
+      events[0].as(Termisu::Event::Key).modifiers.ctrl?.should be_true
+      events[1].as(Termisu::Event::Key).char.should eq('p')
+    end
   end
 end
 
