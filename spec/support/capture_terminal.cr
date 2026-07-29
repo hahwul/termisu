@@ -27,12 +27,17 @@ class CaptureTerminal < Termisu::Terminal
   @fake_outfd : Int32 = 1
   @closed : Bool = false
 
-  def initialize(*, sync_updates : Bool = true)
-    super(sync_updates: sync_updates)
+  def initialize(*, sync_updates : Bool = true, terminfo : Termisu::Terminfo = Termisu::Terminfo.new)
+    super(terminfo: terminfo, sync_updates: sync_updates)
   end
 
   def write(data : String)
     @writes << data
+    # Don't call super - we don't want to write to real TTY
+  end
+
+  def write(data : Bytes, columns_advanced = 0)
+    @writes << String.new(data)
     # Don't call super - we don't want to write to real TTY
   end
 

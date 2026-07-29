@@ -5,6 +5,7 @@ import { Color } from "../src/color";
 import { Status } from "../src/constants";
 import { TermisuError } from "../src/errors";
 import { Termisu } from "../src/termisu";
+import type { CellOp } from "../src/types";
 
 type NativeValue = number | bigint | undefined;
 type SymbolFn = (...args: Array<number | bigint>) => NativeValue;
@@ -17,6 +18,7 @@ type TestTermisu = {
   setSyncUpdates(enabled: boolean): void;
   syncUpdates(): boolean;
   setCell(x: number, y: number, char: string | number, style?: unknown): void;
+  setCells(ops: ReadonlyArray<CellOp>): void;
   setCursor(x: number, y: number): void;
   hideCursor(): void;
   showCursor(): void;
@@ -63,6 +65,7 @@ function buildMockTermisu(
     termisu_hide_cursor: () => Status.Ok,
     termisu_show_cursor: () => Status.Ok,
     termisu_set_cell: () => Status.Ok,
+    termisu_set_cells: () => Status.Ok,
     termisu_enable_timer_ms: () => Status.Ok,
     termisu_enable_system_timer_ms: () => Status.Ok,
     termisu_disable_timer: () => Status.Ok,
@@ -182,6 +185,41 @@ describe("Termisu wrapper behavior", () => {
     expect(() => termisu.setCell(0, 0, "")).toThrow("Character must not be empty");
     const setCellCalls = calls.filter((entry) => entry.name === "termisu_set_cell");
     expect(setCellCalls).toHaveLength(0);
+  });
+
+  it("marshals setCells batches into a single native call", () => {
+    const { termisu, calls } = buildMockTermisu();
+
+    termisu.setCells([
+      { x: 0, y: 0, char: "A" },
+      { x: 1, y: 0, char: 66 },
+      { x: 2, y: 0, char: "C" },
+      { x: 3, y: 0, char: "D", style: { fg: Color.green, attr: attrs(Attribute.Bold) } },
+    ]);
+
+    const batchCalls = calls.filter((entry) => entry.name === "termisu_set_cells");
+    expect(batchCalls).toHaveLength(1);
+    expect(batchCalls[0]?.args[0]).toBe(1n);
+    const opsPtr = batchCalls[0]?.args[1];
+    expect(Number(opsPtr ?? 0)).not.toBe(0);
+    expect(batchCalls[0]?.args[2]).toBe(4n);
+  });
+
+  it("skips the native call for empty setCells batches", () => {
+    const { termisu, calls } = buildMockTermisu();
+
+    termisu.setCells([]);
+
+    const batchCalls = calls.filter((entry) => entry.name === "termisu_set_cells");
+    expect(batchCalls).toHaveLength(0);
+  });
+
+  it("throws TermisuError when setCells reports a rejected batch", () => {
+    const { termisu } = buildMockTermisu({
+      termisu_set_cells: () => Status.Rejected,
+    });
+
+    expect(() => termisu.setCells([{ x: 0, y: 0, char: "A" }])).toThrow(TermisuError);
   });
 
   it("returns null for timeout and none events in pollEvent", () => {
