@@ -184,6 +184,14 @@ class Termisu::Input::Parser
   #
   # Also: Modifier keys alone (Ctrl, Alt, Shift) don't send any bytes in
   # standard terminal input. We can only detect them combined with other keys.
+  #
+  # Both 0x0D and 0x0A yield Key::Enter, but they carry the byte that produced
+  # them as `char` ('\r' / '\n'). Without bracketed paste a terminal hands a
+  # pasted CRLF over as those two bytes back to back, and an application that
+  # cannot tell them apart inserts TWO newlines per pasted line. `char` lets a
+  # caller collapse the pair; nothing else changes (`Event::Key#char` already
+  # fell back to '\n' for Enter, so a caller that ignores it sees no difference
+  # on the 0x0A path).
   private def parse_byte(byte : UInt8) : Event::Any
     # Snapshot + clear the one-shot dup guard: it only matches a raw byte that
     # arrives IMMEDIATELY after the CSI-u event that set it (handled in the
@@ -201,9 +209,9 @@ class Termisu::Input::Parser
     when 0x09 # Tab (technically Ctrl+I, but always treat as Tab)
       Event::Key.new(Key::Tab)
     when 0x0A # Line feed (Ctrl+J) - treat as Enter
-      Event::Key.new(Key::Enter)
+      Event::Key.new(Key::Enter, char: '\n')
     when 0x0D # Carriage return (Ctrl+M) - treat as Enter
-      Event::Key.new(Key::Enter)
+      Event::Key.new(Key::Enter, char: '\r')
     when 0x01..0x1A # Ctrl+A through Ctrl+Z (excluding special cases above)
       key = Key.from_char(('a'.ord + byte - 1).chr)
       Event::Key.new(key, Modifier::Ctrl)
