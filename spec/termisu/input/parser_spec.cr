@@ -161,6 +161,19 @@ describe Termisu::Input::Parser do
           event.ctrl?.should be_false
         end
       end
+
+      # Both bytes are Key::Enter, so `char` is the ONLY way an application can tell a
+      # pasted CRLF (0x0D 0x0A — one line break) from two separate newlines. Without it
+      # every pasted line gains a blank line after it.
+      it "reports which byte produced Enter" do
+        cr = parse_sequence(Bytes[0x0D])
+        cr.should be_a(Termisu::Event::Key)
+        cr.as(Termisu::Event::Key).char.should eq('\r')
+
+        lf = parse_sequence(Bytes[0x0A])
+        lf.should be_a(Termisu::Event::Key)
+        lf.as(Termisu::Event::Key).char.should eq('\n')
+      end
     end
 
     context "CSI sequences (arrow keys)" do
