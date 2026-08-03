@@ -510,10 +510,12 @@ class Termisu::Terminal < Termisu::Renderer
     # Track state to restore
     was_in_alternate = @alternate_screen
 
-    # First thing written for the switch: the mode must already be off on the
-    # wire before the block gets the tty, and neither the cursor writes below
-    # nor exit_alternate_screen are guaranteed to flush on every path.
+    # First thing written for the switch: both reporting modes must already be off on
+    # the wire before the block gets the tty, and neither the cursor writes below nor
+    # exit_alternate_screen are guaranteed to flush on every path. `apply_terminal_state`
+    # in the `ensure` puts back whatever was on.
     suspend_bracketed_paste
+    suspend_mouse
 
     backup_cursor = @cursor
     @cursor = Cursor.new visible: true
@@ -914,6 +916,24 @@ class Termisu::Terminal < Termisu::Renderer
   private def suspend_bracketed_paste
     return unless @bracketed_paste
     apply_bracketed_paste_state false
+    flush
+  end
+
+  # Mouse reporting must be OFF for the duration of a `with_mode` block, for the same
+  # reason bracketed paste must be: the block hands the tty to something else — an
+  # external editor, a shell — and that program inherits fd 0. With tracking still on,
+  # the emulator writes `\e[<0;40;12M` reports into ITS stdin on every click and scroll.
+  # A pager shows garbage; an editor inserts the bytes into the buffer being edited,
+  # which for anything editing wire-exact data is corruption, not cosmetics.
+  #
+  # `apply_terminal_state` in the `ensure` already restores whatever was on, so this only
+  # needs to handle the suspend half. Guarded on the flag so a caller that never enabled
+  # the mouse emits nothing — mirroring `suspend_bracketed_paste` rather than
+  # `apply_mouse_state`, whose unconditional disable would put `\e[?1006l` on the wire for
+  # every consumer that never asked for mouse in the first place.
+  private def suspend_mouse
+    return unless @mouse_enabled
+    apply_mouse_state false
     flush
   end
 

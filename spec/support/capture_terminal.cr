@@ -94,6 +94,7 @@ class CaptureTerminal < Termisu::Terminal
     was_in_alternate = @alternate_screen
 
     suspend_bracketed_paste
+    suspend_mouse
 
     backup_cursor = @cursor
     @cursor = Cursor.new visible: true
