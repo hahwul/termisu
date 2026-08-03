@@ -27,6 +27,7 @@ class Termisu::Terminal < Termisu::Renderer
   @alternate_screen : Bool = false
   @mouse_enabled : Bool = false
   @enhanced_keyboard : Bool = false
+  @bracketed_paste : Bool = false
   @sync_updates : Bool = true
   getter cursor : Cursor = Cursor.new
   getter title : String = ""
@@ -509,6 +510,11 @@ class Termisu::Terminal < Termisu::Renderer
     # Track state to restore
     was_in_alternate = @alternate_screen
 
+    # First thing written for the switch: the mode must already be off on the
+    # wire before the block gets the tty, and neither the cursor writes below
+    # nor exit_alternate_screen are guaranteed to flush on every path.
+    suspend_bracketed_paste
+
     backup_cursor = @cursor
     @cursor = Cursor.new visible: true
     apply_cursor_state
@@ -603,6 +609,7 @@ class Termisu::Terminal < Termisu::Renderer
     Log.debug { "Closing terminal" }
     disable_mouse
     disable_enhanced_keyboard
+    disable_bracketed_paste
     exit_alternate_screen
     disable_raw_mode
     @backend.close
@@ -750,6 +757,15 @@ class Termisu::Terminal < Termisu::Renderer
   MODIFY_OTHER_KEYS_ENABLE  = "\e[>4;2m" # Enable mode 2
   MODIFY_OTHER_KEYS_DISABLE = "\e[>4;0m" # Disable
 
+  # Bracketed paste escape sequences (DEC private mode 2004).
+  #
+  # While enabled the terminal wraps pasted text in \e[200~ ... \e[201~ and
+  # hands the bytes between them over verbatim, without the CR/LF translation
+  # it applies to typed input. Terminals that don't implement it ignore the
+  # sequences and keep sending pastes as plain input.
+  BRACKETED_PASTE_ENABLE  = "\e[?2004h"
+  BRACKETED_PASTE_DISABLE = "\e[?2004l"
+
   # Enables mouse input tracking.
   #
   # Enables SGR extended mouse protocol (mode 1006) for better coordinate
@@ -831,9 +847,74 @@ class Termisu::Terminal < Termisu::Renderer
     @enhanced_keyboard
   end
 
+  # --- Bracketed Paste Support ---
+
+  # Enables bracketed paste mode.
+  #
+  # The terminal then wraps pasted text in \e[200~ ... \e[201~, which the input
+  # parser surfaces as `Input::Key::PasteStart` / `Input::Key::PasteEnd`, and
+  # stops translating line endings inside the paste.
+  #
+  # Without it a paste is indistinguishable from typing: a pasted CRLF arrives
+  # as the same bytes Enter produces, and some terminals map the LF to a second
+  # CR so one pasted line break looks exactly like two deliberate Enters. No
+  # amount of content inspection can separate those, which is why the boundary
+  # markers are the only correct fix.
+  #
+  # The bytes between the markers are still reported exactly as they arrive (a
+  # pasted CR is `Key::Enter` with `char == '\r'`): the markers say *where* the
+  # paste is, they do not normalize what is inside it.
+  #
+  # Example:
+  # ```
+  # terminal.enable_bracketed_paste
+  # # Pastes are now delimited by Key::PasteStart / Key::PasteEnd
+  # terminal.disable_bracketed_paste # When done
+  # ```
+  def enable_bracketed_paste
+    return if @bracketed_paste
+    Log.debug { "Enabling bracketed paste" }
+    apply_bracketed_paste_state true
+    flush
+    @bracketed_paste = true
+  end
+
+  # Disables bracketed paste mode.
+  #
+  # Pasted text goes back to arriving as plain input with no boundary markers.
+  def disable_bracketed_paste
+    return unless @bracketed_paste
+    Log.debug { "Disabling bracketed paste" }
+    apply_bracketed_paste_state false
+    flush
+    @bracketed_paste = false
+  end
+
+  # Returns whether bracketed paste mode is currently enabled.
+  def bracketed_paste? : Bool
+    @bracketed_paste
+  end
+
   private def apply_terminal_state
     apply_mouse_state @mouse_enabled
     apply_enhanced_keyboard_state @enhanced_keyboard
+    # Guarded, unlike the two above: a caller that never asked for bracketed
+    # paste must not see 2004h/2004l on the wire at all, and re-asserting "off"
+    # would clobber the mode for an embedding application that set it itself.
+    apply_bracketed_paste_state true if @bracketed_paste
+  end
+
+  # Turns bracketed paste off across a mode switch, to be restored by
+  # apply_terminal_state afterwards.
+  #
+  # with_mode hands the tty to something else — an editor, a shell, a cooked
+  # `gets` — and that something never asked for our mode. Leaving 2004 on means
+  # it receives \e[200~ literals it does not understand, and an unrestored mode
+  # that outlives the process is a defect in its own right.
+  private def suspend_bracketed_paste
+    return unless @bracketed_paste
+    apply_bracketed_paste_state false
+    flush
   end
 
   private def apply_mouse_state(enabled : Bool)
@@ -856,6 +937,10 @@ class Termisu::Terminal < Termisu::Renderer
       write(KITTY_KEYBOARD_DISABLE)
       write(MODIFY_OTHER_KEYS_DISABLE)
     end
+  end
+
+  private def apply_bracketed_paste_state(enabled : Bool)
+    write(enabled ? BRACKETED_PASTE_ENABLE : BRACKETED_PASTE_DISABLE)
   end
 
   def title=(title : String)

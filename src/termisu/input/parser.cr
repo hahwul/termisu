@@ -82,6 +82,17 @@ class Termisu::Input::Parser
     34 => Key::F20,
   }
 
+  # Bracketed paste boundary codes, also delivered as `\e[N~` sequences.
+  #
+  # Kept out of TILDE_KEYS because they are not keystrokes: they only mark
+  # where a paste begins and ends. A terminal sends them exclusively while DEC
+  # private mode 2004 is on (see `Terminal#enable_bracketed_paste`), which is
+  # why an application that never enables the mode cannot observe them.
+  PASTE_KEYS = {
+    200 => Key::PasteStart,
+    201 => Key::PasteEnd,
+  }
+
   # SS3 final character to Key mapping (\eO...).
   SS3_KEYS = {
     'P' => Key::F1,
@@ -192,6 +203,13 @@ class Termisu::Input::Parser
   # caller collapse the pair; nothing else changes (`Event::Key#char` already
   # fell back to '\n' for Enter, so a caller that ignores it sees no difference
   # on the 0x0A path).
+  #
+  # `char` alone is not always enough: some terminals map the LF of a pasted
+  # CRLF to a second CR, and CR CR is by definition what pressing Enter twice
+  # looks like. `Terminal#enable_bracketed_paste` is the reliable answer — it
+  # brackets the run with Key::PasteStart/PasteEnd and stops the translation.
+  # These byte paths stay exactly as they are inside a paste: bracketing says
+  # where the paste is, it does not normalize what is in it.
   private def parse_byte(byte : UInt8) : Event::Any
     # Snapshot + clear the one-shot dup guard: it only matches a raw byte that
     # arrives IMMEDIATELY after the CSI-u event that set it (handled in the
@@ -347,7 +365,10 @@ class Termisu::Input::Parser
         return parse_modify_other_keys(parts)
       end
 
-      key = TILDE_KEYS[code]? || Key::Unknown
+      # PASTE_KEYS is consulted after TILDE_KEYS so the keys people actually
+      # press stay a single lookup; 200/201 would otherwise fall through to
+      # Key::Unknown and be indistinguishable from each other.
+      key = TILDE_KEYS[code]? || PASTE_KEYS[code]? || Key::Unknown
       return Event::Key.new(key, modifiers)
     end
 

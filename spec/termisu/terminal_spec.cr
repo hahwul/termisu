@@ -639,6 +639,88 @@ describe Termisu::Terminal do
       end
     end
 
+    describe "bracketed paste state" do
+      it "enables bracketed paste once and flushes once" do
+        terminal = CaptureTerminal.new
+
+        terminal.enable_bracketed_paste
+        terminal.enable_bracketed_paste
+
+        terminal.bracketed_paste?.should be_true
+        terminal.output.should eq(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+        terminal.captured_flush_count.should eq 1
+      ensure
+        terminal.try &.close
+      end
+
+      it "disables bracketed paste once and flushes once" do
+        terminal = CaptureTerminal.new
+        terminal.enable_bracketed_paste
+        terminal.clear_captured
+
+        terminal.disable_bracketed_paste
+        terminal.disable_bracketed_paste
+
+        terminal.bracketed_paste?.should be_false
+        terminal.output.should eq(Termisu::Terminal::BRACKETED_PASTE_DISABLE)
+        terminal.captured_flush_count.should eq 1
+      ensure
+        terminal.try &.close
+      end
+
+      # An enabled mode that outlives the process leaves the user's shell
+      # swallowing \e[200~ around every paste.
+      it "disables bracketed paste on close" do
+        terminal = CaptureTerminal.new
+        terminal.enable_bracketed_paste
+        terminal.clear_captured
+
+        terminal.close
+
+        terminal.bracketed_paste?.should be_false
+        terminal.output.should contain(Termisu::Terminal::BRACKETED_PASTE_DISABLE)
+      end
+
+      # with_mode hands the tty to something that never asked for mode 2004,
+      # so it must be off for that window and back on afterwards.
+      it "turns bracketed paste off for the duration of with_mode and restores it after" do
+        terminal = CaptureTerminal.new
+        terminal.enable_bracketed_paste
+        terminal.clear_captured
+        during = ""
+
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) do
+          during = terminal.output
+        end
+
+        during.should contain(Termisu::Terminal::BRACKETED_PASTE_DISABLE)
+        during.should_not contain(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+        terminal.bracketed_paste?.should be_true
+        terminal.output.should contain(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+        # The suspend flush is the extra one: the mode has to be off on the
+        # wire before the block runs, it cannot wait for the restore flush.
+        terminal.captured_flush_count.should eq 2
+      ensure
+        terminal.try &.close
+      end
+
+      # Backward compatibility: mode 2004 must be invisible to every caller
+      # that never asked for it, unlike the mouse and keyboard states which are
+      # re-asserted unconditionally.
+      it "never touches the mode for a caller that did not enable it" do
+        terminal = CaptureTerminal.new
+        terminal.enable_mouse
+        terminal.enable_enhanced_keyboard
+        terminal.clear_captured
+
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) { }
+        terminal.close
+
+        terminal.bracketed_paste?.should be_false
+        terminal.output.should_not contain("2004")
+      end
+    end
+
     describe "#title=" do
       it "writes the title when it changes" do
         terminal = CaptureTerminal.new

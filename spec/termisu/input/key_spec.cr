@@ -388,6 +388,29 @@ describe Termisu::Input::Key do
     end
   end
 
+  describe "bracketed paste markers" do
+    # key_code crosses the C ABI and the JS binding as a plain integer, so the
+    # numbering below Unknown is part of the contract. PasteStart/PasteEnd were
+    # appended after it precisely so nothing shifted; this pins that.
+    it "leaves every pre-existing key value unchanged" do
+      Termisu::Input::Key::Unknown.value.should eq(139)
+      Termisu::Input::Key::BackTab.value.should eq(138)
+      Termisu::Input::Key::PasteStart.value.should eq(140)
+      Termisu::Input::Key::PasteEnd.value.should eq(141)
+    end
+
+    # They mark boundaries, they do not insert text.
+    it "is not printable and not a keystroke category" do
+      Termisu::Input::Key::PasteStart.printable?.should be_false
+      Termisu::Input::Key::PasteEnd.printable?.should be_false
+      Termisu::Input::Key::PasteStart.to_char.should be_nil
+      Termisu::Input::Key::PasteEnd.to_char.should be_nil
+      Termisu::Input::Key::PasteStart.letter?.should be_false
+      Termisu::Input::Key::PasteStart.function_key?.should be_false
+      Termisu::Input::Key::PasteStart.navigation?.should be_false
+    end
+  end
+
   describe "roundtrip conversion" do
     it "from_char -> to_char roundtrips for printable chars" do
       printable_chars = ('A'..'Z').to_a + ('a'..'z').to_a + ('0'..'9').to_a
