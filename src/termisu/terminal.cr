@@ -508,12 +508,23 @@ class Termisu::Terminal < Termisu::Renderer
 
     # Track state to restore
     was_in_alternate = @alternate_screen
+    was_mouse_enabled = @mouse_enabled
 
-    # First thing written for the switch: the mode must already be off on the wire
-    # before the block gets the tty, and neither the cursor writes below nor
-    # exit_alternate_screen are guaranteed to flush on every path.
-    # `apply_terminal_state` in the `ensure` puts back whatever was on.
-    suspend_mouse
+    # Mouse off before the block gets the tty, restored in the `ensure` from the local
+    # above. The block hands fd 0 to another program — an editor, a shell, a pager — and
+    # with tracking still on the emulator writes `\e[<0;40;12M` into THAT program's stdin
+    # on every click. A pager shows garbage; an editor inserts the bytes into the buffer
+    # being edited, which for anything editing wire-exact data is corruption.
+    #
+    # Must be the first thing written for the switch: neither the cursor writes below nor
+    # exit_alternate_screen are guaranteed to flush on every path. Clearing the flag is
+    # what makes nesting safe — an inner `with_mode` then sees it already off and its
+    # restore cannot re-enable reporting while this block still owns the tty.
+    if was_mouse_enabled
+      apply_mouse_state false
+      flush
+      @mouse_enabled = false
+    end
 
     backup_cursor = @cursor
     @cursor = Cursor.new visible: true
@@ -532,6 +543,7 @@ class Termisu::Terminal < Termisu::Renderer
 
     @cursor = backup_cursor unless backup_cursor.nil?
     apply_cursor_state
+    @mouse_enabled = was_mouse_enabled unless was_mouse_enabled.nil?
     apply_terminal_state
     # Always invalidate after non-raw modes - screen content is
     # unpredictable after puts/print/gets during the mode block
@@ -848,24 +860,6 @@ class Termisu::Terminal < Termisu::Renderer
   # one passes unnoticed.
   private def with_backend_mode(mode : Terminal::Mode, &)
     @backend.with_mode(mode) { yield }
-  end
-
-  # Turns mouse reporting off across a mode switch, to be restored by
-  # `apply_terminal_state` afterwards.
-  #
-  # `with_mode` hands the tty to something else — an external editor, a shell, a
-  # pager — and that program inherits fd 0. With tracking still on, the emulator
-  # writes `\e[<0;40;12M` reports into ITS stdin on every click and scroll. A pager
-  # shows garbage; an editor inserts the bytes into the buffer being edited, which
-  # for anything editing wire-exact data is corruption, not cosmetics.
-  #
-  # Guarded on the flag, deliberately unlike `apply_mouse_state`: a caller that never
-  # enabled the mouse must not see `\e[?1006l` on the wire at all, and pays no extra
-  # flush for a mode it never asked for.
-  private def suspend_mouse
-    return unless @mouse_enabled
-    apply_mouse_state false
-    flush
   end
 
   private def apply_mouse_state(enabled : Bool)

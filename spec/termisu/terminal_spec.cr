@@ -630,6 +630,51 @@ describe Termisu::Terminal do
       ensure
         terminal.try &.close
       end
+
+      # Nesting is the case the flag alone got wrong: `suspend_mouse` leaves
+      # `@mouse_enabled` true on purpose, so an inner scope's restore used to re-enable
+      # reporting while the OUTER block still owned the tty — exactly the leak this
+      # whole change exists to prevent, just one level in. Shelling out and prompting
+      # for a password inside that shell-out is the real shape of it.
+      #
+      # Sampled inside the outer block, after the inner one returns: that is the only
+      # window where the regression is observable.
+      it "keeps mouse suspended after an inner with_mode returns" do
+        terminal = CaptureTerminal.new
+        terminal.enable_mouse
+        terminal.clear_captured
+
+        after_inner = ""
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) do
+          terminal.with_mode(Termisu::Terminal::Mode.password, preserve_screen: true) { }
+          after_inner = terminal.output
+        end
+
+        after_inner.should_not contain(Termisu::Terminal::MOUSE_ENABLE_SGR)
+        after_inner.should_not contain(Termisu::Terminal::MOUSE_ENABLE_NORMAL)
+        # Restored once the outermost scope exits, not before.
+        terminal.output.should contain(Termisu::Terminal::MOUSE_ENABLE_SGR)
+      ensure
+        terminal.try &.close
+      end
+
+      # Reporting comes back once, when the outermost scope exits — not once per level.
+      # The inner scope does re-send a disable, which is harmless: it is already off, and
+      # the restore writes the flag unconditionally either way.
+      it "restores mouse exactly once regardless of nesting depth" do
+        terminal = CaptureTerminal.new
+        terminal.enable_mouse
+        terminal.clear_captured
+
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) do
+          terminal.with_mode(Termisu::Terminal::Mode.password, preserve_screen: true) { }
+        end
+
+        terminal.output.scan(Termisu::Terminal::MOUSE_ENABLE_SGR).size.should eq 1
+        terminal.mouse_enabled?.should be_true
+      ensure
+        terminal.try &.close
+      end
     end
 
     describe "enhanced keyboard state" do
