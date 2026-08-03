@@ -93,6 +93,8 @@ class CaptureTerminal < Termisu::Terminal
     user_interactive = mode.canonical? || mode.echo?
     was_in_alternate = @alternate_screen
 
+    suspend_bracketed_paste
+
     backup_cursor = @cursor
     @cursor = Cursor.new visible: true
     apply_cursor_state
@@ -123,6 +125,7 @@ class CaptureTerminal < Termisu::Terminal
     @closed = true
     disable_mouse
     disable_enhanced_keyboard
+    disable_bracketed_paste
     exit_alternate_screen
     disable_raw_mode
   end

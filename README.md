@@ -194,6 +194,31 @@ termisu.mouse_enabled?
 termisu.enable_enhanced_keyboard   # Kitty protocol (Tab vs Ctrl+I)
 termisu.disable_enhanced_keyboard
 termisu.enhanced_keyboard?
+
+termisu.enable_bracketed_paste     # Paste vs typing (mode 2004)
+termisu.disable_bracketed_paste
+termisu.bracketed_paste?
+```
+
+With bracketed paste on, a paste is delimited by `Key::PasteStart` and
+`Key::PasteEnd`, and the terminal delivers the bytes between them verbatim
+instead of translating line endings. Without it a pasted CRLF is byte-identical
+to pressing Enter — and some terminals map the LF to a second CR, so one pasted
+line break is indistinguishable from two deliberate Enters. The events inside a
+paste are unchanged (a pasted CR is still `Key::Enter` with `char == '\r'`):
+bracketing tells you where the paste is, it does not normalize it.
+
+```crystal
+termisu.enable_bracketed_paste
+pasting = false
+termisu.each_event do |event|
+  next unless event.is_a?(Termisu::Event::Key)
+  case event.key
+  when .paste_start? then pasting = true
+  when .paste_end?   then pasting = false
+  else                    handle(event, pasted: pasting)
+  end
+end
 ```
 
 ### Timer (for animations)
