@@ -89,32 +89,18 @@ class CaptureTerminal < Termisu::Terminal
     @fake_raw_mode = mode.raw?
   end
 
-  def with_mode(mode : Termisu::Terminal::Mode, preserve_screen : Bool = false, &)
-    user_interactive = mode.canonical? || mode.echo?
-    was_in_alternate = @alternate_screen
-
-    backup_cursor = @cursor
-    @cursor = Cursor.new visible: true
-    apply_cursor_state
-
-    exit_alternate_screen if !preserve_screen && user_interactive && was_in_alternate
-
+  # `with_mode` itself is NOT overridden: only this one step is, so every spec that goes
+  # through with_mode drives the production ordering — the suspend before the yield, the
+  # restore in the ensure. Copying the whole method here instead, which is what this used
+  # to do, meant a spec could pin an ordering the shipped code no longer had.
+  private def with_backend_mode(mode : Termisu::Terminal::Mode, &)
     previous = @fake_current_mode
     self.mode = mode
-    yield
-  ensure
-    self.mode = previous || Termisu::Terminal::Mode.raw
-
-    if was_in_alternate && !@alternate_screen
-      enter_alternate_screen
+    begin
+      yield
+    ensure
+      self.mode = previous || Termisu::Terminal::Mode.raw
     end
-
-    @cursor = backup_cursor unless backup_cursor.nil?
-    apply_cursor_state
-    apply_terminal_state
-    invalidate_buffer unless mode.none?
-    reset_render_state
-    flush
   end
 
   def close

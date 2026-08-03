@@ -578,16 +578,54 @@ describe Termisu::Terminal do
         terminal.try &.close
       end
 
-      it "reapplies mouse state after with_mode restore with one consolidated flush" do
+      # Two flushes now, not one: mouse reporting is turned OFF before the block gets the
+      # tty and back ON in the ensure. It has to be — the block hands fd 0 to another
+      # program (an external editor, a shell), and with tracking still on the emulator
+      # writes `\e[<0;40;12M` into THAT program's stdin on every click. The count is pinned
+      # rather than ignored because each flush is a syscall on a hot path; what this asserts
+      # is "one for the suspend, one for the restore, and no per-write churn".
+      it "suspends mouse for the block and reapplies it after, one flush each way" do
         terminal = CaptureTerminal.new
         terminal.enable_mouse
         terminal.clear_captured
 
-        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) { }
+        # Sampled INSIDE the block, which is the only place the contract is observable:
+        # what matters is the state of the wire while the child owns the tty. Comparing
+        # the two indices after the fact would not pin it — a disable emitted anywhere
+        # before the ensure's re-enable satisfies that ordering, including one emitted
+        # after the yield, by which point the child has already taken the clicks.
+        during = ""
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) do
+          during = terminal.output
+        end
+
+        during.should contain(Termisu::Terminal::MOUSE_DISABLE_SGR)
+        during.should contain(Termisu::Terminal::MOUSE_DISABLE_NORMAL)
+        during.should_not contain(Termisu::Terminal::MOUSE_ENABLE_SGR)
 
         terminal.mouse_enabled?.should be_true
         terminal.output.should contain(Termisu::Terminal::MOUSE_ENABLE_SGR)
         terminal.output.should contain(Termisu::Terminal::MOUSE_ENABLE_NORMAL)
+        terminal.captured_flush_count.should eq 2
+      ensure
+        terminal.try &.close
+      end
+
+      # The suspend is flag-guarded, so a consumer that never enabled mouse pays nothing for
+      # it: no write and no extra flush before the block. The flush count is the assertion
+      # because it is what the guard actually controls.
+      #
+      # NOT asserted: that the wire is free of mouse sequences entirely. It is not, and that
+      # predates this change — `apply_terminal_state` calls `apply_mouse_state @mouse_enabled`
+      # UNCONDITIONALLY in the restore, so a `false` there still writes 1006l/1000l for a
+      # caller that never enabled mouse. Guarding the restore too would change behaviour on a
+      # path this fix does not otherwise touch, so it is left alone deliberately.
+      it "adds no write and no flush for the suspend when mouse was never enabled" do
+        terminal = CaptureTerminal.new
+        terminal.clear_captured
+
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) { }
+
         terminal.captured_flush_count.should eq 1
       ensure
         terminal.try &.close

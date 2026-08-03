@@ -509,6 +509,12 @@ class Termisu::Terminal < Termisu::Renderer
     # Track state to restore
     was_in_alternate = @alternate_screen
 
+    # First thing written for the switch: the mode must already be off on the wire
+    # before the block gets the tty, and neither the cursor writes below nor
+    # exit_alternate_screen are guaranteed to flush on every path.
+    # `apply_terminal_state` in the `ensure` puts back whatever was on.
+    suspend_mouse
+
     backup_cursor = @cursor
     @cursor = Cursor.new visible: true
     apply_cursor_state
@@ -517,7 +523,7 @@ class Termisu::Terminal < Termisu::Renderer
     exit_alternate_screen if !preserve_screen && user_interactive && was_in_alternate
 
     # Switch mode via backend (handles termios and tracking)
-    @backend.with_mode(mode) { yield }
+    with_backend_mode(mode) { yield }
   ensure
     Log.debug { "Exiting with_mode, restoring state" }
     if was_in_alternate && !@alternate_screen
@@ -834,6 +840,32 @@ class Termisu::Terminal < Termisu::Renderer
   private def apply_terminal_state
     apply_mouse_state @mouse_enabled
     apply_enhanced_keyboard_state @enhanced_keyboard
+  end
+
+  # The single step of `with_mode` that needs a live tty, split out so a test double can
+  # replace just this and inherit everything around it. Overriding `with_mode` wholesale
+  # means a spec drives its own copy of the ordering above, and a regression in the real
+  # one passes unnoticed.
+  private def with_backend_mode(mode : Terminal::Mode, &)
+    @backend.with_mode(mode) { yield }
+  end
+
+  # Turns mouse reporting off across a mode switch, to be restored by
+  # `apply_terminal_state` afterwards.
+  #
+  # `with_mode` hands the tty to something else — an external editor, a shell, a
+  # pager — and that program inherits fd 0. With tracking still on, the emulator
+  # writes `\e[<0;40;12M` reports into ITS stdin on every click and scroll. A pager
+  # shows garbage; an editor inserts the bytes into the buffer being edited, which
+  # for anything editing wire-exact data is corruption, not cosmetics.
+  #
+  # Guarded on the flag, deliberately unlike `apply_mouse_state`: a caller that never
+  # enabled the mouse must not see `\e[?1006l` on the wire at all, and pays no extra
+  # flush for a mode it never asked for.
+  private def suspend_mouse
+    return unless @mouse_enabled
+    apply_mouse_state false
+    flush
   end
 
   private def apply_mouse_state(enabled : Bool)
