@@ -793,6 +793,43 @@ class Termisu
   # ```
   delegate enable_enhanced_keyboard, disable_enhanced_keyboard, enhanced_keyboard?, to: @terminal
 
+  # --- Bracketed Paste Support ---
+
+  # Enables bracketed paste mode.
+  #
+  # Pastes are then delimited by `Key::PasteStart` and `Key::PasteEnd` events,
+  # and the terminal delivers the bytes between them verbatim instead of
+  # translating line endings the way it does for typed input.
+  #
+  # This is the only reliable way to tell a paste from typing. A pasted CRLF
+  # otherwise arrives as the very bytes Enter produces, and some terminals turn
+  # the LF into a second CR — one pasted line break then looks identical to two
+  # deliberate Enters, so no inspection of the content can separate them.
+  #
+  # The events between the markers are unchanged: a pasted CR is still
+  # `Key::Enter` with `char == '\r'`, an LF still `char == '\n'`. Bracketing
+  # tells you where the paste is; interpreting its bytes is up to you.
+  #
+  # Note: terminals that don't implement mode 2004 ignore the request, and no
+  # markers ever arrive — the same behavior as leaving it disabled.
+  #
+  # Example:
+  # ```
+  # termisu.enable_bracketed_paste
+  # pasting = false
+  # termisu.each_event do |event|
+  #   case event
+  #   when Termisu::Event::Key
+  #     case event.key
+  #     when .paste_start? then pasting = true
+  #     when .paste_end?   then pasting = false
+  #     else                    handle(event, pasted: pasting)
+  #     end
+  #   end
+  # end
+  # ```
+  delegate enable_bracketed_paste, disable_bracketed_paste, bracketed_paste?, to: @terminal
+
   # The title assigned to the Terminal's window
   delegate title, :title=, to: @terminal
 end

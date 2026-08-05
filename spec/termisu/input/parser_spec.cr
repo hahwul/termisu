@@ -16,6 +16,38 @@ private def parse_sequence(bytes : Bytes) : Termisu::Event::Any?
   end
 end
 
+# Writes *head* now and *tail* after *gap_ms*, the second write coming from a
+# CHILD PROCESS on purpose: the reader waits in select(2), which does not yield to
+# the Crystal scheduler, so a `spawn`ed fiber would never get to run the delayed
+# write and the split could not be reproduced in-process.
+private def parse_events_delayed_tail(head : Bytes, tail : String, gap_ms : Int32,
+                                      count : Int32) : Array(Termisu::Event::Any?)
+  read_fd, write_fd = create_pipe
+  events = [] of Termisu::Event::Any?
+  sink = IO::FileDescriptor.new(write_fd)
+  begin
+    sink.write(head)
+    sink.flush
+    writer = Process.new("sh", ["-c", "sleep #{gap_ms / 1000.0}; printf '%s' '#{tail}'"],
+      output: sink)
+    reader = Termisu::Reader.new(read_fd)
+    parser = Termisu::Input::Parser.new(reader)
+    count.times { events << parser.poll_event(100) }
+  ensure
+    writer.try(&.wait)
+    reader.try(&.close)
+    LibC.close(read_fd)
+    sink.close
+  end
+  events
+end
+
+# Keys of the events in *events*, for asserting the shape of a whole paste.
+# Pairs with `parse_events`, defined at the foot of this file.
+private def keys_of(events : Array(Termisu::Event::Any?)) : Array(Termisu::Input::Key?)
+  events.map { |event| event.is_a?(Termisu::Event::Key) ? event.key : nil }
+end
+
 describe Termisu::Input::Parser do
   describe "constants" do
     it "has reasonable escape timeout" do
@@ -340,6 +372,146 @@ describe Termisu::Input::Parser do
       end
     end
 
+    context "bracketed paste (DEC mode 2004)" do
+      # Bytes for \e[200~ and \e[201~, the markers a terminal wraps a paste in.
+      paste_start = Bytes[0x1B, '['.ord, '2'.ord, '0'.ord, '0'.ord, '~'.ord]
+      paste_end = Bytes[0x1B, '['.ord, '2'.ord, '0'.ord, '1'.ord, '~'.ord]
+
+      it "parses the paste start marker (\\e[200~)" do
+        event = parse_sequence(paste_start)
+        event.should be_a(Termisu::Event::Key)
+        if event.is_a?(Termisu::Event::Key)
+          event.key.should eq(Termisu::Input::Key::PasteStart)
+          event.modifiers.should eq(Termisu::Input::Modifier::None)
+          # A marker inserts nothing: a caller appending event.char to a buffer
+          # must not gain a stray character from the bracketing itself.
+          event.char.should be_nil
+        end
+      end
+
+      it "parses the paste end marker (\\e[201~)" do
+        event = parse_sequence(paste_end)
+        event.should be_a(Termisu::Event::Key)
+        if event.is_a?(Termisu::Event::Key)
+          event.key.should eq(Termisu::Input::Key::PasteEnd)
+          event.modifiers.should eq(Termisu::Input::Modifier::None)
+          event.char.should be_nil
+        end
+      end
+
+      # The two markers used to both fall through to Key::Unknown, so a caller
+      # could see that *something* happened but not whether a paste had begun
+      # or ended.
+      it "tells start from end" do
+        parse_sequence(paste_start).should_not eq(parse_sequence(paste_end))
+      end
+
+      # The whole point of bracketing: the terminal stops translating line
+      # endings inside a paste, and termisu must not re-introduce a
+      # translation of its own. A pasted CRLF stays two events carrying the
+      # exact bytes that arrived.
+      it "reports a CRLF inside a paste as the bytes that arrived" do
+        bytes = Bytes[
+          0x1B, '['.ord, '2'.ord, '0'.ord, '0'.ord, '~'.ord,
+          'A'.ord, 0x0D, 0x0A, 'B'.ord,
+          0x1B, '['.ord, '2'.ord, '0'.ord, '1'.ord, '~'.ord,
+        ]
+        events = parse_events(bytes, 6)
+
+        keys_of(events).should eq([
+          Termisu::Input::Key::PasteStart,
+          Termisu::Input::Key::UpperA,
+          Termisu::Input::Key::Enter,
+          Termisu::Input::Key::Enter,
+          Termisu::Input::Key::UpperB,
+          Termisu::Input::Key::PasteEnd,
+        ])
+        events[2].as(Termisu::Event::Key).char.should eq('\r')
+        events[3].as(Termisu::Event::Key).char.should eq('\n')
+      end
+
+      # A terminal can be interrupted, or the mode can be turned off mid-paste.
+      # The parser holds no paste state, so a start with no matching end must
+      # leave the following input parsing normally.
+      it "keeps parsing after an unterminated paste start" do
+        bytes = Bytes[0x1B, '['.ord, '2'.ord, '0'.ord, '0'.ord, '~'.ord, 'x'.ord]
+        events = parse_events(bytes, 2)
+
+        keys_of(events).should eq([
+          Termisu::Input::Key::PasteStart,
+          Termisu::Input::Key::LowerX,
+        ])
+      end
+
+      # A stray end marker is equally survivable — nothing anywhere is armed by
+      # a start.
+      it "keeps parsing after an unmatched paste end" do
+        bytes = Bytes[0x1B, '['.ord, '2'.ord, '0'.ord, '1'.ord, '~'.ord, 'x'.ord]
+        events = parse_events(bytes, 2)
+
+        keys_of(events).should eq([
+          Termisu::Input::Key::PasteEnd,
+          Termisu::Input::Key::LowerX,
+        ])
+      end
+
+      # The end marker is the one escape byte guaranteed to sit at the tail of an
+      # arbitrarily large transfer, so it is the one most exposed to jitter: ssh/mosh
+      # or a loaded machine can land its ESC and its remaining five bytes in different
+      # reads. Parsed as a sequence, a gap past ESCAPE_TIMEOUT_MS resolves the ESC as a
+      # bare Escape and spills `[201~` into the document as text — and the lost PasteEnd
+      # wedges a boolean consumer permanently "pasting". 200ms is 4x that timeout.
+      it "finds the end marker even when its ESC arrives long before the rest" do
+        head = Bytes[0x1B, '['.ord, '2'.ord, '0'.ord, '0'.ord, '~'.ord,
+          'a'.ord, 'b'.ord, 0x1B]
+        events = parse_events_delayed_tail(head, "[201~", 200, 4)
+
+        keys_of(events).should eq([
+          Termisu::Input::Key::PasteStart,
+          Termisu::Input::Key::LowerA,
+          Termisu::Input::Key::LowerB,
+          Termisu::Input::Key::PasteEnd,
+        ])
+      end
+
+      # Second route to the same wedge, with no timing involved: a complete paste whose
+      # CONTENT ends in a truncated escape. Parsed as a sequence, the content ESC's
+      # Alt-key branch swallows the marker's ESC, or the CSI parameter buffer absorbs it
+      # and the marker's `[` terminates it as a final byte. Matching the marker literally
+      # keeps the content ESC as content and still closes the paste.
+      it "closes the paste when the content itself ends in a bare ESC" do
+        bytes = Bytes[0x1B, '['.ord, '2'.ord, '0'.ord, '0'.ord, '~'.ord,
+          'a'.ord, 0x1B,
+          0x1B, '['.ord, '2'.ord, '0'.ord, '1'.ord, '~'.ord]
+        events = parse_events(bytes, 4)
+
+        keys_of(events).should eq([
+          Termisu::Input::Key::PasteStart,
+          Termisu::Input::Key::LowerA,
+          Termisu::Input::Key::Escape,
+          Termisu::Input::Key::PasteEnd,
+        ])
+      end
+
+      # Inside a paste an escape is content, not a keystroke to interpret: the bytes come
+      # back exactly as they arrived. This is what makes the boundary uncorruptible — a
+      # CSI in the pasted text can no longer consume the marker that follows it.
+      it "delivers an escape sequence inside a paste as its literal bytes" do
+        bytes = Bytes[0x1B, '['.ord, '2'.ord, '0'.ord, '0'.ord, '~'.ord,
+          0x1B, '['.ord, 'A'.ord,
+          0x1B, '['.ord, '2'.ord, '0'.ord, '1'.ord, '~'.ord]
+        events = parse_events(bytes, 5)
+
+        keys_of(events).should eq([
+          Termisu::Input::Key::PasteStart,
+          Termisu::Input::Key::Escape,
+          Termisu::Input::Key::LeftBracket,
+          Termisu::Input::Key::UpperA,
+          Termisu::Input::Key::PasteEnd,
+        ])
+      end
+    end
+
     context "SS3 sequences (F1-F4)" do
       it "parses F1 (\\eOP)" do
         event = parse_sequence(Bytes[0x1B, 'O'.ord, 'P'.ord])
@@ -636,7 +808,8 @@ end
 
 # Drives the parser over a single byte stream, polling `count` events. Used to
 # exercise the interaction between a Kitty CSI-u text report and the raw-byte
-# path that immediately follows it.
+# path that immediately follows it, and by the bracketed-paste specs, where a
+# paste is only meaningful as a sequence of events rather than one at a time.
 private def parse_events(bytes : Bytes, count : Int32) : Array(Termisu::Event::Any?)
   read_fd, write_fd = create_pipe
   events = [] of Termisu::Event::Any?

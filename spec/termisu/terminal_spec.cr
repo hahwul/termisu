@@ -731,6 +731,152 @@ describe Termisu::Terminal do
       end
     end
 
+    describe "bracketed paste state" do
+      it "enables bracketed paste once and flushes once" do
+        terminal = CaptureTerminal.new
+
+        terminal.enable_bracketed_paste
+        terminal.enable_bracketed_paste
+
+        terminal.bracketed_paste?.should be_true
+        terminal.output.should eq(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+        terminal.captured_flush_count.should eq 1
+      ensure
+        terminal.try &.close
+      end
+
+      it "disables bracketed paste once and flushes once" do
+        terminal = CaptureTerminal.new
+        terminal.enable_bracketed_paste
+        terminal.clear_captured
+
+        terminal.disable_bracketed_paste
+        terminal.disable_bracketed_paste
+
+        terminal.bracketed_paste?.should be_false
+        terminal.output.should eq(Termisu::Terminal::BRACKETED_PASTE_DISABLE)
+        terminal.captured_flush_count.should eq 1
+      ensure
+        terminal.try &.close
+      end
+
+      # An enabled mode that outlives the process leaves the user's shell
+      # swallowing \e[200~ around every paste.
+      it "disables bracketed paste on close" do
+        terminal = CaptureTerminal.new
+        terminal.enable_bracketed_paste
+        terminal.clear_captured
+
+        terminal.close
+
+        terminal.bracketed_paste?.should be_false
+        terminal.output.should contain(Termisu::Terminal::BRACKETED_PASTE_DISABLE)
+      end
+
+      # with_mode hands the tty to something that never asked for mode 2004,
+      # so it must be off for that window and back on afterwards.
+      it "turns bracketed paste off for the duration of with_mode and restores it after" do
+        terminal = CaptureTerminal.new
+        terminal.enable_bracketed_paste
+        terminal.clear_captured
+        during = ""
+
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) do
+          during = terminal.output
+        end
+
+        during.should contain(Termisu::Terminal::BRACKETED_PASTE_DISABLE)
+        during.should_not contain(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+        terminal.bracketed_paste?.should be_true
+        terminal.output.should contain(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+        # The suspend flush is the extra one: the mode has to be off on the
+        # wire before the block runs, it cannot wait for the restore flush.
+        terminal.captured_flush_count.should eq 2
+      ensure
+        terminal.try &.close
+      end
+
+      # Backward compatibility: mode 2004 must be invisible to every caller
+      # that never asked for it, unlike the mouse and keyboard states which are
+      # re-asserted unconditionally.
+      it "never touches the mode for a caller that did not enable it" do
+        terminal = CaptureTerminal.new
+        terminal.enable_mouse
+        terminal.enable_enhanced_keyboard
+        terminal.clear_captured
+
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) { }
+        terminal.close
+
+        terminal.bracketed_paste?.should be_false
+        terminal.output.should_not contain("2004")
+      end
+
+      # The nesting case, mirroring the mouse specs above: clearing `@bracketed_paste`
+      # for the duration is what stops an inner scope's restore from putting 2004h back
+      # while the OUTER block still owns the tty. Shelling out and prompting for a
+      # password inside that shell-out is the real shape of it.
+      #
+      # Sampled inside the outer block, after the inner one returns — the only window
+      # where the regression is observable.
+      it "keeps bracketed paste suspended after an inner with_mode returns" do
+        terminal = CaptureTerminal.new
+        terminal.enable_bracketed_paste
+        terminal.clear_captured
+
+        after_inner = ""
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) do
+          terminal.with_mode(Termisu::Terminal::Mode.password, preserve_screen: true) { }
+          after_inner = terminal.output
+        end
+
+        after_inner.should_not contain(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+        # Restored once the outermost scope exits, not before.
+        terminal.output.should contain(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+      ensure
+        terminal.try &.close
+      end
+
+      # Comes back once, when the outermost scope exits — not once per level.
+      it "restores bracketed paste exactly once regardless of nesting depth" do
+        terminal = CaptureTerminal.new
+        terminal.enable_bracketed_paste
+        terminal.clear_captured
+
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) do
+          terminal.with_mode(Termisu::Terminal::Mode.password, preserve_screen: true) { }
+        end
+
+        terminal.output.scan(Termisu::Terminal::BRACKETED_PASTE_ENABLE).size.should eq 1
+        terminal.bracketed_paste?.should be_true
+      ensure
+        terminal.try &.close
+      end
+
+      # The desync the guard would otherwise create. A block that enables the mode while
+      # it was off outside leaves 2004h on the wire, and the restore is about to record
+      # the flag as false — after which the guarded `disable_bracketed_paste` and `close`
+      # can never clear it and the mode outlives the process. The disable has to be
+      # emitted here, where the discrepancy is still visible.
+      it "clears the mode a block turned on while it was off outside" do
+        terminal = CaptureTerminal.new
+        terminal.clear_captured
+
+        terminal.with_mode(Termisu::Terminal::Mode.cooked, preserve_screen: true) do
+          terminal.enable_bracketed_paste
+        end
+
+        terminal.bracketed_paste?.should be_false
+        terminal.output.should contain(Termisu::Terminal::BRACKETED_PASTE_DISABLE)
+        # The library's view and the terminal's agree again: the last 2004 byte on the
+        # wire is the disable, not the block's enable.
+        terminal.output.rindex!(Termisu::Terminal::BRACKETED_PASTE_DISABLE)
+          .should be > terminal.output.rindex!(Termisu::Terminal::BRACKETED_PASTE_ENABLE)
+      ensure
+        terminal.try &.close
+      end
+    end
+
     describe "#title=" do
       it "writes the title when it changes" do
         terminal = CaptureTerminal.new

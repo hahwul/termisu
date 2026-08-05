@@ -82,6 +82,38 @@ class Termisu::Input::Parser
     34 => Key::F20,
   }
 
+  # Bracketed paste boundary codes, also delivered as `\e[N~` sequences.
+  #
+  # Kept out of TILDE_KEYS because they are not keystrokes: they only mark
+  # where a paste begins and ends. A terminal sends them exclusively while DEC
+  # private mode 2004 is on (see `Terminal#enable_bracketed_paste`), which is
+  # why an application that never enables the mode cannot observe them.
+  PASTE_KEYS = {
+    200 => Key::PasteStart,
+    201 => Key::PasteEnd,
+  }
+
+  # The bytes that follow ESC in the end marker, matched literally.
+  #
+  # Inside a paste the terminator is found by comparing raw bytes, never by
+  # parsing an escape sequence. Two ways the parsing route loses it: the fd can
+  # run dry at the marker's ESC and the rest arrive after ESCAPE_TIMEOUT_MS (the
+  # ESC then resolves as a bare Escape and `[201~` lands as text), and paste
+  # CONTENT ending in a truncated escape can swallow the marker's ESC into its
+  # own Alt-key or CSI-parameter branch. Both wedge a consumer that tracks
+  # PasteStart/PasteEnd as a boolean, since the mode never closes.
+  PASTE_END_TAIL = "[201~".bytes
+
+  # How long to wait for the rest of the end marker once its ESC has arrived.
+  #
+  # Deliberately not ESCAPE_TIMEOUT_MS: that value exists to tell a lone Escape
+  # KEYPRESS from a sequence, a distinction a paste has already settled — the
+  # terminal opened the bracket and owes us the close. It only has to outlast
+  # scheduling jitter on the tail of a transfer (ssh/mosh, a loaded machine),
+  # which 50ms does not. Bounded rather than infinite so a terminal that dies
+  # mid-paste degrades to delivering the bytes as content instead of hanging.
+  PASTE_END_TIMEOUT_MS = 1000
+
   # SS3 final character to Key mapping (\eO...).
   SS3_KEYS = {
     'P' => Key::F1,
@@ -115,6 +147,14 @@ class Termisu::Input::Parser
   # so plain unmodified keys (which arrive as raw bytes under the 17u flag set,
   # since report_all_keys is off) are never wrongly dropped.
   @dup_guard : Char? = nil
+  # Whether a PasteStart has been delivered without its matching PasteEnd. The
+  # only thing it changes is how ESC is treated: inside a paste ESC is either the
+  # start of the literal end marker or content, never a sequence to interpret.
+  @in_paste : Bool = false
+  # Bytes read while checking for the end marker that turned out not to be it.
+  # Bounded by PASTE_END_TAIL.size — the paste body is never accumulated here, so
+  # an arbitrarily large transfer still streams a byte at a time.
+  @pending = Deque(UInt8).new
 
   def initialize(@reader : Reader)
   end
@@ -164,6 +204,12 @@ class Termisu::Input::Parser
   #
   # Returns an Event or nil if timeout/no data.
   def poll_event(timeout_ms : Int32 = -1) : Event::Any?
+    # Bytes already taken off the fd while probing for an end marker come first,
+    # and without consulting the fd: they have arrived, so no timeout applies.
+    if byte = @pending.shift?
+      return parse_byte(byte)
+    end
+
     unless @reader.wait_for_data(timeout_ms < 0 ? Int32::MAX : timeout_ms)
       return
     end
@@ -196,9 +242,10 @@ class Termisu::Input::Parser
   # That collapse is only available when CR LF actually arrives as CR LF, which is
   # not something a terminal guarantees. Some normalize the LF of a pasted CRLF
   # into a SECOND CR, and CR CR is by definition what pressing Enter twice looks
-  # like — no inspection of `char` separates those. Reporting the byte is what a
-  # caller has to work with; telling a paste from typing at all needs boundary
-  # markers from the terminal (DEC private mode 2004), not byte content.
+  # like — no inspection of `char` separates those. `Terminal#enable_bracketed_paste`
+  # is the reliable answer: it brackets the run with Key::PasteStart/PasteEnd and
+  # stops the translation. These byte paths stay exactly as they are inside a
+  # paste — bracketing says where the paste is, it does not normalize what is in it.
   private def parse_byte(byte : UInt8) : Event::Any
     # Snapshot + clear the one-shot dup guard: it only matches a raw byte that
     # arrives IMMEDIATELY after the CSI-u event that set it (handled in the
@@ -208,7 +255,7 @@ class Termisu::Input::Parser
     @dup_guard = nil
     case byte
     when 0x1B # ESC - could be escape key or start of sequence
-      parse_escape_sequence
+      @in_paste ? parse_paste_escape : parse_escape_sequence
     when 0x00 # Ctrl+Space or Ctrl+@
       Event::Key.new(Key::Space, Modifier::Ctrl)
     when 0x08 # Backspace (Ctrl+H on some terminals, but treat as Backspace)
@@ -249,6 +296,44 @@ class Termisu::Input::Parser
   end
 
   # Parses an escape sequence starting with ESC (0x1B).
+  # ESC arriving inside a paste: either it opens the literal end marker, or it is
+  # content. Never a sequence to interpret — that route is what loses the marker.
+  #
+  # The comparison is against raw bytes and waits on PASTE_END_TIMEOUT_MS, so
+  # neither escape parsing nor the 50ms Escape-key heuristic can consume them. On
+  # a miss every byte taken is handed back in order, so content that merely looks
+  # like a marker at first is delivered whole rather than eaten by the probe.
+  private def parse_paste_escape : Event::Any
+    tail = read_paste_end_tail
+
+    if tail.size == PASTE_END_TAIL.size && tail == PASTE_END_TAIL
+      @in_paste = false
+      return Event::Key.new(Key::PasteEnd)
+    end
+
+    tail.reverse_each { |b| @pending.unshift(b) }
+    Event::Key.new(Key::Escape, char: '\e')
+  end
+
+  # Up to PASTE_END_TAIL.size bytes following an in-paste ESC, drawn from the
+  # push-back buffer first. Returns fewer only when the stream stalls past
+  # PASTE_END_TIMEOUT_MS or ends, which is a truncated paste, not a marker.
+  private def read_paste_end_tail : Array(UInt8)
+    tail = [] of UInt8
+
+    while tail.size < PASTE_END_TAIL.size
+      byte = @pending.shift?
+      unless byte
+        break unless @reader.wait_for_data(PASTE_END_TIMEOUT_MS)
+        byte = @reader.read_byte
+        break unless byte
+      end
+      tail << byte
+    end
+
+    tail
+  end
+
   private def parse_escape_sequence : Event::Any
     # Check if more data follows (escape sequence) or just ESC key
     unless @reader.wait_for_data(ESCAPE_TIMEOUT_MS)
@@ -354,7 +439,16 @@ class Termisu::Input::Parser
         return parse_modify_other_keys(parts)
       end
 
-      key = TILDE_KEYS[code]? || Key::Unknown
+      # PASTE_KEYS is consulted after TILDE_KEYS so the keys people actually
+      # press stay a single lookup; 200/201 would otherwise fall through to
+      # Key::Unknown and be indistinguishable from each other.
+      key = TILDE_KEYS[code]? || PASTE_KEYS[code]? || Key::Unknown
+      # Only the START marker is recognised through sequence parsing; from here
+      # the end marker is matched literally (see `parse_paste_escape`). An
+      # unmatched PasteEnd arriving outside a paste just clears a flag already
+      # false, so a stray marker cannot open a paste that was never started.
+      @in_paste = true if key.paste_start?
+      @in_paste = false if key.paste_end?
       return Event::Key.new(key, modifiers)
     end
 
