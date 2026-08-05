@@ -109,6 +109,7 @@ class CaptureTerminal < Termisu::Terminal
     @closed = true
     disable_mouse
     disable_enhanced_keyboard
+    disable_bracketed_paste
     exit_alternate_screen
     disable_raw_mode
   end

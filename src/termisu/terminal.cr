@@ -27,6 +27,7 @@ class Termisu::Terminal < Termisu::Renderer
   @alternate_screen : Bool = false
   @mouse_enabled : Bool = false
   @enhanced_keyboard : Bool = false
+  @bracketed_paste : Bool = false
   @sync_updates : Bool = true
   getter cursor : Cursor = Cursor.new
   getter title : String = ""
@@ -509,6 +510,7 @@ class Termisu::Terminal < Termisu::Renderer
     # Track state to restore
     was_in_alternate = @alternate_screen
     was_mouse_enabled = @mouse_enabled
+    was_bracketed_paste = @bracketed_paste
 
     # Mouse off before the block gets the tty, restored in the `ensure` from the local
     # above. The block hands fd 0 to another program — an editor, a shell, a pager — and
@@ -525,6 +527,11 @@ class Termisu::Terminal < Termisu::Renderer
       flush
       @mouse_enabled = false
     end
+
+    # Mode 2004 off for the same window and by the same rule as the mouse above. Kept in
+    # a method rather than inlined next to it only to hold `with_mode` under the
+    # cyclomatic-complexity limit; the ordering requirement is identical.
+    suspend_bracketed_paste
 
     backup_cursor = @cursor
     @cursor = Cursor.new visible: true
@@ -544,6 +551,7 @@ class Termisu::Terminal < Termisu::Renderer
     @cursor = backup_cursor unless backup_cursor.nil?
     apply_cursor_state
     @mouse_enabled = was_mouse_enabled unless was_mouse_enabled.nil?
+    restore_bracketed_paste was_bracketed_paste
     apply_terminal_state
     # Always invalidate after non-raw modes - screen content is
     # unpredictable after puts/print/gets during the mode block
@@ -621,6 +629,7 @@ class Termisu::Terminal < Termisu::Renderer
     Log.debug { "Closing terminal" }
     disable_mouse
     disable_enhanced_keyboard
+    disable_bracketed_paste
     exit_alternate_screen
     disable_raw_mode
     @backend.close
@@ -768,6 +777,15 @@ class Termisu::Terminal < Termisu::Renderer
   MODIFY_OTHER_KEYS_ENABLE  = "\e[>4;2m" # Enable mode 2
   MODIFY_OTHER_KEYS_DISABLE = "\e[>4;0m" # Disable
 
+  # Bracketed paste escape sequences (DEC private mode 2004).
+  #
+  # While enabled the terminal wraps pasted text in \e[200~ ... \e[201~ and
+  # hands the bytes between them over verbatim, without the CR/LF translation
+  # it applies to typed input. Terminals that don't implement it ignore the
+  # sequences and keep sending pastes as plain input.
+  BRACKETED_PASTE_ENABLE  = "\e[?2004h"
+  BRACKETED_PASTE_DISABLE = "\e[?2004l"
+
   # Enables mouse input tracking.
   #
   # Enables SGR extended mouse protocol (mode 1006) for better coordinate
@@ -849,9 +867,92 @@ class Termisu::Terminal < Termisu::Renderer
     @enhanced_keyboard
   end
 
+  # --- Bracketed Paste Support ---
+
+  # Enables bracketed paste mode.
+  #
+  # The terminal then wraps pasted text in \e[200~ ... \e[201~, which the input
+  # parser surfaces as `Input::Key::PasteStart` / `Input::Key::PasteEnd`, and
+  # stops translating line endings inside the paste.
+  #
+  # Without it a paste is indistinguishable from typing: a pasted CRLF arrives
+  # as the same bytes Enter produces, and some terminals map the LF to a second
+  # CR so one pasted line break looks exactly like two deliberate Enters. No
+  # amount of content inspection can separate those, which is why the boundary
+  # markers are the only correct fix.
+  #
+  # The bytes between the markers are still reported exactly as they arrive (a
+  # pasted CR is `Key::Enter` with `char == '\r'`): the markers say *where* the
+  # paste is, they do not normalize what is inside it.
+  #
+  # Example:
+  # ```
+  # terminal.enable_bracketed_paste
+  # # Pastes are now delimited by Key::PasteStart / Key::PasteEnd
+  # terminal.disable_bracketed_paste # When done
+  # ```
+  def enable_bracketed_paste
+    return if @bracketed_paste
+    Log.debug { "Enabling bracketed paste" }
+    apply_bracketed_paste_state true
+    flush
+    @bracketed_paste = true
+  end
+
+  # Disables bracketed paste mode.
+  #
+  # Pasted text goes back to arriving as plain input with no boundary markers.
+  def disable_bracketed_paste
+    return unless @bracketed_paste
+    Log.debug { "Disabling bracketed paste" }
+    apply_bracketed_paste_state false
+    flush
+    @bracketed_paste = false
+  end
+
+  # Returns whether bracketed paste mode is currently enabled.
+  def bracketed_paste? : Bool
+    @bracketed_paste
+  end
+
   private def apply_terminal_state
     apply_mouse_state @mouse_enabled
     apply_enhanced_keyboard_state @enhanced_keyboard
+    # Guarded, unlike the two above: a caller that never asked for bracketed
+    # paste must not see 2004h/2004l on the wire at all, and re-asserting "off"
+    # would clobber the mode for an embedding application that set it itself.
+    apply_bracketed_paste_state true if @bracketed_paste
+  end
+
+  # Puts the caller's mode-2004 state back after a `with_mode` block, reconciling the
+  # wire with the flag first.
+  #
+  # A block that turned the mode ON while it was off outside leaves 2004h at the terminal,
+  # and *was_enabled* is about to record it as off. `apply_terminal_state` would write
+  # nothing — its re-apply is guarded so a caller who never asked for 2004 never sees it
+  # on the wire — and `disable_bracketed_paste` and `close` are guarded on the same flag,
+  # so nothing could ever clear it and the mode would outlive the process. The mouse path
+  # self-heals in this scenario only because its re-apply is unconditional, which is the
+  # trade the guard here deliberately does not make.
+  private def restore_bracketed_paste(was_enabled : Bool?) : Nil
+    apply_bracketed_paste_state(false) if @bracketed_paste && !was_enabled
+    @bracketed_paste = was_enabled unless was_enabled.nil?
+  end
+
+  # Turns mode 2004 off for the duration of a `with_mode` block, restored by
+  # `apply_terminal_state` from the caller's saved flag.
+  #
+  # `with_mode` hands the tty to something else — an editor, a shell, a cooked `gets` —
+  # and that something never asked for bracketing: it would receive `\e[200~` literals it
+  # does not understand, and a mode left on after the process exits is a defect of its
+  # own. Clearing `@bracketed_paste` is what makes nesting safe, exactly as clearing
+  # `@mouse_enabled` does: an inner scope then sees it already off, and its restore cannot
+  # put 2004h back while the outer block still owns the tty.
+  private def suspend_bracketed_paste
+    return unless @bracketed_paste
+    apply_bracketed_paste_state false
+    flush
+    @bracketed_paste = false
   end
 
   # The single step of `with_mode` that needs a live tty, split out so a test double can
@@ -882,6 +983,10 @@ class Termisu::Terminal < Termisu::Renderer
       write(KITTY_KEYBOARD_DISABLE)
       write(MODIFY_OTHER_KEYS_DISABLE)
     end
+  end
+
+  private def apply_bracketed_paste_state(enabled : Bool)
+    write(enabled ? BRACKETED_PASTE_ENABLE : BRACKETED_PASTE_DISABLE)
   end
 
   def title=(title : String)

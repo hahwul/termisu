@@ -176,6 +176,21 @@ enum Termisu::Input::Key
   BackTab # Shift+Tab
   Unknown # Unrecognized sequence
 
+  # Bracketed paste boundaries (DEC private mode 2004), only ever reported
+  # while `Terminal#enable_bracketed_paste` is active.
+  #
+  # These are not keystrokes: they bracket a run of bytes the terminal pasted
+  # verbatim, so a caller can tell a pasted line break from one the operator
+  # typed. The bytes between them are reported unchanged — a pasted CR is
+  # still `Enter` with `char == '\r'`.
+  #
+  # Appended after `Unknown` deliberately. `key_code` crosses the C ABI and the
+  # JS binding as a plain integer with no enum mirror on the other side (see
+  # `FFI::Conversions.write_key_event`), so inserting these next to the other
+  # non-character keys would renumber every key above them.
+  PasteStart
+  PasteEnd
+
   # Creates a Key from a printable character.
   #
   # Maps ASCII characters to their corresponding Key enum values.
