@@ -32,7 +32,17 @@ private def parse_events_delayed_tail(head : Bytes, tail : String, gap_ms : Int3
       output: sink)
     reader = Termisu::Reader.new(read_fd)
     parser = Termisu::Input::Parser.new(reader)
-    count.times { events << parser.poll_event(100) }
+    # Poll until *count* events arrive rather than polling exactly *count* times.
+    # A poll budget that expires while the end-marker probe is still open yields
+    # nil and the probe resumes on the next call, which is what a real event loop
+    # does; polling a fixed number of times would record that nil as an event.
+    # Bounded so a genuine failure to deliver still ends the spec.
+    deadline = monotonic_now + (gap_ms + 2000).milliseconds
+    while events.size < count && monotonic_now < deadline
+      if event = parser.poll_event(100)
+        events << event
+      end
+    end
   ensure
     writer.try(&.wait)
     reader.try(&.close)
@@ -472,6 +482,35 @@ describe Termisu::Input::Parser do
           Termisu::Input::Key::LowerB,
           Termisu::Input::Key::PasteEnd,
         ])
+      end
+
+      # The marker window must not be charged to the caller. Waiting it out inside one
+      # poll would block a 16ms render loop for a full second on a truncated paste —
+      # ~60 dropped frames from a silent contract violation. The probe is advanced by
+      # whatever time each call has and resumes on the next, so a short budget costs
+      # latency, never the marker (the spec above proves the marker still arrives).
+      it "honors the caller's poll budget while an end-marker probe is open" do
+        read_fd, write_fd = create_pipe
+        begin
+          # Opens a paste, then a dangling ESC with nothing behind it: the probe stays
+          # open for the full PASTE_END_TIMEOUT_MS window.
+          bytes = Bytes[0x1B, '['.ord, '2'.ord, '0'.ord, '0'.ord, '~'.ord, 'a'.ord, 0x1B]
+          sink = IO::FileDescriptor.new(write_fd)
+          sink.write(bytes)
+          sink.flush
+
+          reader = Termisu::Reader.new(read_fd)
+          parser = Termisu::Input::Parser.new(reader)
+          parser.poll_event(100) # PasteStart
+          parser.poll_event(100) # 'a'
+
+          elapsed = Time.measure { parser.poll_event(16) }
+          elapsed.should be < 200.milliseconds
+        ensure
+          reader.try(&.close)
+          LibC.close(read_fd)
+          sink.try(&.close)
+        end
       end
 
       # Second route to the same wedge, with no timing involved: a complete paste whose
