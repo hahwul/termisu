@@ -155,6 +155,12 @@ class Termisu::Input::Parser
   # Bounded by PASTE_END_TAIL.size — the paste body is never accumulated here, so
   # an arbitrarily large transfer still streams a byte at a time.
   @pending = Deque(UInt8).new
+  # When the open end-marker probe gives up, and the current call's budget.
+  # Waiting the whole marker window inside one `poll_event` would charge a 16ms
+  # render loop a full second on a truncated paste; instead each call waits only
+  # what it has, hands the ESC back, and the next call resumes the probe.
+  @paste_deadline : MonotonicTime? = nil
+  @poll_deadline : MonotonicTime? = nil
 
   def initialize(@reader : Reader)
   end
@@ -204,6 +210,8 @@ class Termisu::Input::Parser
   #
   # Returns an Event or nil if timeout/no data.
   def poll_event(timeout_ms : Int32 = -1) : Event::Any?
+    @poll_deadline = timeout_ms < 0 ? nil : monotonic_now + timeout_ms.milliseconds
+
     # Bytes already taken off the fd while probing for an end marker come first,
     # and without consulting the fd: they have arrived, so no timeout applies.
     if byte = @pending.shift?
@@ -246,7 +254,7 @@ class Termisu::Input::Parser
   # is the reliable answer: it brackets the run with Key::PasteStart/PasteEnd and
   # stops the translation. These byte paths stay exactly as they are inside a
   # paste — bracketing says where the paste is, it does not normalize what is in it.
-  private def parse_byte(byte : UInt8) : Event::Any
+  private def parse_byte(byte : UInt8) : Event::Any?
     # Snapshot + clear the one-shot dup guard: it only matches a raw byte that
     # arrives IMMEDIATELY after the CSI-u event that set it (handled in the
     # printable branch below). Any other byte clears it. The escape branch may
@@ -303,16 +311,26 @@ class Termisu::Input::Parser
   # neither escape parsing nor the 50ms Escape-key heuristic can consume them. On
   # a miss every byte taken is handed back in order, so content that merely looks
   # like a marker at first is delivered whole rather than eaten by the probe.
-  private def parse_paste_escape : Event::Any
+  private def parse_paste_escape : Event::Any?
+    @paste_deadline ||= monotonic_now + PASTE_END_TIMEOUT_MS.milliseconds
     tail = read_paste_end_tail
+    tail.reverse_each { |b| @pending.unshift(b) }
 
-    if tail.size == PASTE_END_TAIL.size && tail == PASTE_END_TAIL
-      @in_paste = false
-      return Event::Key.new(Key::PasteEnd)
+    # Short of a full marker while the window is still open: this call simply ran
+    # out of budget. Put the ESC back too and report no event — the next call
+    # re-enters here and keeps waiting, so a short poll interval costs latency
+    # rather than the marker.
+    if tail.size < PASTE_END_TAIL.size && ms_until(@paste_deadline) > 0
+      @pending.unshift(0x1B_u8)
+      return nil
     end
 
-    tail.reverse_each { |b| @pending.unshift(b) }
-    Event::Key.new(Key::Escape, char: '\e')
+    @paste_deadline = nil
+    return Event::Key.new(Key::Escape, char: '\e') unless tail == PASTE_END_TAIL
+
+    PASTE_END_TAIL.size.times { @pending.shift }
+    @in_paste = false
+    Event::Key.new(Key::PasteEnd)
   end
 
   # Up to PASTE_END_TAIL.size bytes following an in-paste ESC, drawn from the
@@ -324,7 +342,9 @@ class Termisu::Input::Parser
     while tail.size < PASTE_END_TAIL.size
       byte = @pending.shift?
       unless byte
-        break unless @reader.wait_for_data(PASTE_END_TIMEOUT_MS)
+        wait = paste_wait_ms
+        break if wait <= 0
+        break unless @reader.wait_for_data(wait)
         byte = @reader.read_byte
         break unless byte
       end
@@ -332,6 +352,20 @@ class Termisu::Input::Parser
     end
 
     tail
+  end
+
+  # How long to block for the next marker byte: the shorter of what the caller
+  # asked for and what is left of the marker window.
+  private def paste_wait_ms : Int32
+    window = ms_until(@paste_deadline)
+    budget = @poll_deadline ? ms_until(@poll_deadline) : window
+    {window, budget}.min
+  end
+
+  private def ms_until(deadline : MonotonicTime?) : Int32
+    return 0 unless deadline
+    remaining = (deadline - monotonic_now).total_milliseconds
+    remaining <= 0 ? 0 : remaining.ceil.to_i
   end
 
   private def parse_escape_sequence : Event::Any
