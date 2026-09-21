@@ -207,16 +207,31 @@ class Termisu::Terminal
   end
 
   private def advance_cursor(columns_advanced : Int32) : Nil
-    # Skipping the wrap arithmetic assumes @cursor.x < width, which holds
-    # except transiently after a shrink-resize before the next move_cursor.
     return if columns_advanced == 0
 
-    width, height = size
-    return if width <= 0 || height <= 0
+    width, _height = size
+    return if width <= 0
 
     x = @cursor.x + columns_advanced
 
-    @cursor.x = x % width
-    @cursor.y = (@cursor.y + x // width).clamp(0, height - 1)
+    # Reaching the row's last column hands the next position to the TERMINAL, whose
+    # wrap behaviour is `am` (auto_right_margin) plus `xenl` (eat_newline_glitch) --
+    # two terminfo booleans we neither assert with DECAWM nor read. Deriving the
+    # landing spot from OUR width instead assumed the terminal counts columns exactly
+    # as we do, and `move_cursor` then skipped the CUP because its tracked position
+    # already "matched". One grapheme the terminal measures differently (an emoji the
+    # width table calls narrow, say) therefore displaced every row below it, with no
+    # absolute positioning left anywhere in the frame to re-anchor them.
+    #
+    # Dropping the tracked position instead (the same -1 sentinel `apply_cursor_state`
+    # uses for "unknown") costs one CUP per row that runs to the edge -- for a 200x50
+    # sync, 50 sequences of ~7 bytes against a 10 000-cell frame -- and confines any
+    # such disagreement to the single row it happens on.
+    if x >= width
+      @cursor.x, @cursor.y = -1, -1
+      return
+    end
+
+    @cursor.x = x
   end
 end
