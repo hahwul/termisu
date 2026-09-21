@@ -333,4 +333,40 @@ describe Termisu::UnicodeWidth do
       Termisu::UnicodeWidth.grapheme_width("9\u{FE0F}\u{20E3}").should eq(2) # 9️⃣
     end
   end
+  describe "EastAsianWidth=W outside the block checks" do
+    it "returns 2 for default-emoji dingbats and symbols" do
+      # Unicode gives these EAW=W with no variation selector, and terminals draw
+      # them at two columns. They used to report 1 because `wide_codepoint?` never
+      # looked at the BMP symbol area at all.
+      {"⌚", "⏳", "☕", "♈", "♿", "⚡", "⚽", "⛔", "✅", "✨",
+       "❌", "❓", "❗", "➕", "⬛", "⭐", "⭕"}.each do |glyph|
+        Termisu::UnicodeWidth.grapheme_width(glyph).should eq(2)
+      end
+    end
+
+    it "returns 2 for trigrams, hexagrams and CJK strokes" do
+      Termisu::UnicodeWidth.grapheme_width("☰").should eq(2) # U+2630 trigram
+      Termisu::UnicodeWidth.grapheme_width("⚌").should eq(2) # U+268C digram
+      Termisu::UnicodeWidth.grapheme_width("㏿").should eq(2) # U+33FF square gal
+      Termisu::UnicodeWidth.grapheme_width("䷀").should eq(2) # U+4DC0 hexagram
+    end
+
+    it "returns 2 for enclosed CJK markers and wide SMP scripts" do
+      Termisu::UnicodeWidth.grapheme_width("🀄").should eq(2) # U+1F004 mahjong
+      Termisu::UnicodeWidth.grapheme_width("🆚").should eq(2) # U+1F19A squared VS
+      Termisu::UnicodeWidth.grapheme_width("🈲").should eq(2) # U+1F232 squared 禁
+      Termisu::UnicodeWidth.grapheme_width("🉑").should eq(2) # U+1F251 circled 可
+      Termisu::UnicodeWidth.grapheme_width("ꀀ").should eq(2) # U+A000 Yi syllable
+    end
+
+    it "leaves EAW=Ambiguous and EAW=Neutral symbols at 1" do
+      # The line the table draws: Unicode says these are NOT wide, so a terminal
+      # that draws them wide is making its own call and no table can predict it.
+      Termisu::UnicodeWidth.grapheme_width("…").should eq(1) # U+2026
+      Termisu::UnicodeWidth.grapheme_width("·").should eq(1) # U+00B7
+      Termisu::UnicodeWidth.grapheme_width("●").should eq(1) # U+25CF
+      Termisu::UnicodeWidth.grapheme_width("│").should eq(1) # U+2502 box drawing
+      Termisu::UnicodeWidth.grapheme_width("✔").should eq(1) # U+2714 (VS16 widens)
+    end
+  end
 end

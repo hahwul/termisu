@@ -707,8 +707,91 @@ module Termisu::UnicodeWidth
 
   # :nodoc:
   private def self.wide_codepoint?(cp : Int32) : Bool
-    wide_cjk?(cp) || wide_compat_or_fullwidth?(cp) || wide_supplementary?(cp)
+    wide_cjk?(cp) || wide_compat_or_fullwidth?(cp) || wide_supplementary?(cp) ||
+      wide_east_asian_extra?(cp)
   end
+
+  # EastAsianWidth=W ranges the block checks above do not reach: the BMP symbol
+  # area (zodiac, trigrams, the default-emoji dingbats), CJK strokes, hexagrams,
+  # Yi, Hangul Jamo Extended-A, and the SMP historic scripts and enclosed CJK
+  # markers. Unicode calls every one of these two columns and terminals render
+  # them that way, but `codepoint_width` answered 1 — and a grapheme reported one
+  # column narrower than the terminal draws it shifts everything after it on the
+  # row. Sorted and disjoint, so a binary search on the upper bound finds the only
+  # candidate range. Source: UAX #11 EastAsianWidth.txt (Unicode 16.0).
+  private def self.wide_east_asian_extra?(cp : Int32) : Bool
+    range = WIDE_EAST_ASIAN_EXTRA.bsearch { |entry| entry[1] >= cp }
+    !range.nil? && range[0] <= cp
+  end
+
+  # :nodoc:
+  private WIDE_EAST_ASIAN_EXTRA = [
+    {0x231A, 0x231B},   # ⌚..⌛
+    {0x23E9, 0x23EC},   # ⏩..⏬
+    {0x23F0, 0x23F0},   # ⏰
+    {0x23F3, 0x23F3},   # ⏳
+    {0x25FD, 0x25FE},   # ◽..◾
+    {0x2614, 0x2615},   # ☔..☕
+    {0x2630, 0x2637},   # ☰..☷
+    {0x2648, 0x2653},   # ♈..♓
+    {0x267F, 0x267F},   # ♿
+    {0x268A, 0x268F},   # ⚊..⚏
+    {0x2693, 0x2693},   # ⚓
+    {0x26A1, 0x26A1},   # ⚡
+    {0x26AA, 0x26AB},   # ⚪..⚫
+    {0x26BD, 0x26BE},   # ⚽..⚾
+    {0x26C4, 0x26C5},   # ⛄..⛅
+    {0x26CE, 0x26CE},   # ⛎
+    {0x26D4, 0x26D4},   # ⛔
+    {0x26EA, 0x26EA},   # ⛪
+    {0x26F2, 0x26F3},   # ⛲..⛳
+    {0x26F5, 0x26F5},   # ⛵
+    {0x26FA, 0x26FA},   # ⛺
+    {0x26FD, 0x26FD},   # ⛽
+    {0x2705, 0x2705},   # ✅
+    {0x270A, 0x270B},   # ✊..✋
+    {0x2728, 0x2728},   # ✨
+    {0x274C, 0x274C},   # ❌
+    {0x274E, 0x274E},   # ❎
+    {0x2753, 0x2755},   # ❓..❕
+    {0x2757, 0x2757},   # ❗
+    {0x2795, 0x2797},   # ➕..➗
+    {0x27B0, 0x27B0},   # ➰
+    {0x27BF, 0x27BF},   # ➿
+    {0x2B1B, 0x2B1C},   # ⬛..⬜
+    {0x2B50, 0x2B50},   # ⭐
+    {0x2B55, 0x2B55},   # ⭕
+    {0x33C0, 0x33FF},   # ㏀..㏿
+    {0x4DC0, 0x4DFF},   # ䷀..䷿
+    {0xA000, 0xA48C},   # ꀀ..ꒌ
+    {0xA490, 0xA4C6},   # ꒐..꓆
+    {0xA960, 0xA97C},   # ꥠ..ꥼ
+    {0x16FE0, 0x16FE4}, # 𖿠..𖿤
+    {0x16FF0, 0x16FF1}, # 𖿰..𖿱
+    {0x17000, 0x187F7}, # 𗀀..𘟷
+    {0x18800, 0x18CD5}, # 𘠀..𘳕
+    {0x18CFF, 0x18D08}, # 𘳿..𘴈
+    {0x1AFF0, 0x1AFF3}, # 𚿰..𚿳
+    {0x1AFF5, 0x1AFFB}, # 𚿵..𚿻
+    {0x1AFFD, 0x1AFFE}, # 𚿽..𚿾
+    {0x1B000, 0x1B122}, # 𛀀..𛄢
+    {0x1B132, 0x1B132}, # 𛄲
+    {0x1B150, 0x1B152}, # 𛅐..𛅒
+    {0x1B155, 0x1B155}, # 𛅕
+    {0x1B164, 0x1B167}, # 𛅤..𛅧
+    {0x1B170, 0x1B2FB}, # 𛅰..𛋻
+    {0x1D300, 0x1D356}, # 𝌀..𝍖
+    {0x1D360, 0x1D376}, # 𝍠..𝍶
+    {0x1F004, 0x1F004}, # 🀄
+    {0x1F0CF, 0x1F0CF}, # 🃏
+    {0x1F18E, 0x1F18E}, # 🆎
+    {0x1F191, 0x1F19A}, # 🆑..🆚
+    {0x1F200, 0x1F202}, # 🈀..🈂
+    {0x1F210, 0x1F23B}, # 🈐..🈻
+    {0x1F240, 0x1F248}, # 🉀..🉈
+    {0x1F250, 0x1F251}, # 🉐..🉑
+    {0x1F260, 0x1F265}, # 🉠..🉥
+  ]
 
   # CJK Unified, Extension A, Hangul, Hiragana, Katakana, Radicals, Jamo
   private def self.wide_cjk?(cp : Int32) : Bool
