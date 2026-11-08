@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        crystal: ["1.17.0", "1.18.2", "1.19.1", "1.20.0", "1.21.0"]
+        crystal: ["1.17.0", "1.18.2", "1.19.1", "1.20.0", "1.21.0", "1.22.2"]
     permissions:
       checks: write
       contents: read
@@ -55,7 +55,7 @@ jobs:
           restore-keys: |
             freebsd-test-
       - name: Run tests in FreeBSD VM
-        uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3 # v1.5.7
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: "15.0"
           usesh: true
@@ -69,15 +69,19 @@ jobs:
             shards install
             script -q /dev/null crystal spec spec/termisu_spec.cr spec/termisu -v
   build-windows:
-    name: Build examples (Windows)
+    name: Build examples (Crystal ${{ matrix.crystal }}, Windows)
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crystal: ["1.21.0", "1.22.2"]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Setup Crystal
         uses: ./.github/actions/setup-crystal
         with:
-          crystal-version: "1.21.0"
+          crystal-version: ${{ matrix.crystal }}
           install-shards: "false"
       - name: Build examples
         # The runner has no console, so this links rather than runs: it is

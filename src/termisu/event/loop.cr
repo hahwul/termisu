@@ -94,19 +94,19 @@ class Termisu::Event::Loop
 
   # Removes an event source from the loop.
   #
-  # If the source is running, it is stopped before removal.
+  # Stops running sources and finished runs with pending cleanup before removal.
   # Removing a non-existent source is a no-op.
   #
   # Returns self for method chaining.
   def remove_source(source : Source) : self
     @lifecycle_lock.synchronize do
       if @sources.includes?(source)
-        if source.running?
-          source.stop
-          Log.debug { "Stopped source before removal: #{source.name}" }
+        begin
+          source.stop if source.stop_required?
+        ensure
+          @sources.delete(source)
         end
-        @sources.delete(source)
-        Log.debug { "Removed source: #{source.name}" }
+        lifecycle_log { Log.debug { "Removed source: #{source.name}" } }
       end
     end
 

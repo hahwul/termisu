@@ -63,15 +63,24 @@ abstract class Termisu::Event::Source
 
   # Stops producing events.
   #
-  # Sets the running state to false, signaling the fiber to exit.
-  # This should be a quick, non-blocking operation.
-  # The actual fiber cleanup happens on the next loop iteration.
+  # Cancels event production and releases run-owned resources before returning.
+  # Implementations that hand off reader/descriptor ownership must wait for their
+  # worker and source-fiber cleanup, including work blocked on output or readiness.
+  # Safe to call repeatedly; cleanup failures may be raised after resources release.
   abstract def stop : Nil
 
   # Returns true if this source is currently running.
   #
   # Used to check state and control the event production loop.
   abstract def running? : Bool
+
+  # Returns whether removal must call stop.
+  #
+  # Defaults to running? so never-started sources are not stopped.
+  # Override to include finished runs with pending cleanup.
+  def stop_required? : Bool
+    running?
+  end
 
   # Returns a descriptive name for this source.
   #

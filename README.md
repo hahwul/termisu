@@ -1,6 +1,6 @@
 # Termisu
 
-[![Crystal Version](https://img.shields.io/badge/Crystal-%3E%3D1.17.0-000000?style=flat&labelColor=171717&color=000000&logo=crystal&logoColor=white)](https://crystal-lang.org/)
+[![Crystal Version](https://img.shields.io/badge/Crystal-%3E%3D1.17.0%2C%20%3C1.23.0-000000?style=flat&labelColor=171717&color=000000&logo=crystal&logoColor=white)](https://crystal-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=flat&labelColor=171717&logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Tests](https://img.shields.io/github/actions/workflow/status/omarluq/termisu/test.yml?style=flat&labelColor=171717&label=Tests&logo=github&logoColor=white)](https://github.com/omarluq/termisu/actions/workflows/test.yml)
 [![Version](https://img.shields.io/github/release/omarluq/termisu?style=flat&labelColor=171717&color=28a745&label=Version&logo=semver&logoColor=white)](https://github.com/omarluq/termisu/releases)
@@ -34,6 +34,10 @@ dependencies:
 ```
 
 2. Run `shards install`
+
+Supported Crystal versions are 1.17.x–1.22.x (Windows: 1.21.x–1.22.x).
+Input readiness uses Crystal's internal `Thread` API; expanding this range requires
+validating worker creation, cancellation, and failure propagation on the new release.
 
 ## Usage
 
@@ -296,6 +300,7 @@ termisu.with_password_mode do
 end
 
 # Cbreak mode: Character-by-character with echo (Ctrl+C works)
+# Windows: raises NotImplementedError (noncanonical echo is unsupported).
 termisu.with_cbreak_mode do
   print "Press any key: "
   char = STDIN.read_char
@@ -348,6 +353,11 @@ Mode.semi_raw    # TUI with Ctrl+C support
 | full_cooked | ✓         | ✓    | ✓       | Complete shell emulation     |
 | password    | ✓         | -    | ✓       | Secure text entry            |
 | semi_raw    | -         | -    | ✓       | TUI with Ctrl+C support      |
+
+On Windows, applying `Mode.cbreak` (including via `with_cbreak_mode`) raises `NotImplementedError`
+because console echo requires canonical input. `FlowControl`, `CrToNl`, and
+`OutputProcessing` are POSIX-only flags and are ignored by Windows consoles,
+including in `full_cooked`; `current_mode` retains the requested flags.
 
 #### Convenience Methods
 

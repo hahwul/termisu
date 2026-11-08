@@ -35,12 +35,13 @@ on:
 # /dev/tty / terminfo), not the shell.
 jobs:
   e2e:
-    name: E2E (${{ matrix.os }})
+    name: E2E (Crystal ${{ matrix.crystal }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        crystal: ["1.21.0", "1.22.2"]
     permissions:
       contents: read
     steps:
@@ -49,13 +50,25 @@ jobs:
       - name: Setup Crystal
         uses: ./.github/actions/setup-crystal
         with:
-          crystal-version: "1.21.0"
+          crystal-version: ${{ matrix.crystal }}
       - name: Install shards
         run: shards install
       - name: Build hace
         run: shards build hace
       - name: Run E2E suite
         run: bin/hace e2e
+        env:
+          TERMISU_LOG_LEVEL: debug
+          TERMISU_LOG_SYNC: "true"
+          TERMISU_LOG_FILE: ${{ runner.temp }}/termisu-e2e.log
+      - name: Preserve E2E failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-${{ matrix.os }}-crystal-${{ matrix.crystal }}
+          path: ${{ runner.temp }}/termisu-e2e.log
+          if-no-files-found: warn
+          retention-days: 7
   e2e-freebsd:
     name: E2E (FreeBSD 15.0)
     runs-on: ubuntu-latest
@@ -71,11 +84,12 @@ jobs:
           key: freebsd-e2e-${{ hashFiles('shard.yml', 'shard.lock') }}
           restore-keys: |
             freebsd-e2e-
-      - name: Run E2E in FreeBSD VM
-        uses: vmactions/freebsd-vm@4469451fe39bee80be4066836c5170362e9349f3 # v1.5.7
+      - name: Prepare FreeBSD E2E VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: "15.0"
           usesh: true
+          sync: rsync
           prepare: |
             pkg install -y crystal shards terminfo-db
           run: |
@@ -85,4 +99,21 @@ jobs:
             shards --version
             shards install
             shards build hace
-            bin/hace e2e
+      - name: Run FreeBSD E2E suite
+        # This wrapper copies logs back even if the test command fails.
+        shell: freebsd {0}
+        run: |
+          set -eux
+          export TERM=xterm-256color
+          export TERMISU_LOG_LEVEL=debug
+          export TERMISU_LOG_SYNC=true
+          export TERMISU_LOG_FILE="$PWD/termisu-e2e-freebsd.log"
+          bin/hace e2e
+      - name: Preserve FreeBSD E2E failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-freebsd
+          path: termisu-e2e-freebsd.log
+          if-no-files-found: warn
+          retention-days: 7

@@ -30,6 +30,7 @@ module Termisu::Testing
     @exited = Atomic(Bool).new(false)
     @state_lock = Mutex.new
     @last_activity : MonotonicTime
+    @reader_error : Exception? = nil
 
     def initialize(
       program : String,
@@ -173,6 +174,20 @@ module Termisu::Testing
       @exited.get
     end
 
+    # Captures failure-time state without waiting for output or child shutdown.
+    def diagnostics : String
+      terminated = @pty.process.terminated?
+      @state_lock.synchronize do
+        String.build do |io|
+          io << "child_pid=#{@pty.process.pid} child_terminated=#{terminated}\n"
+          io << "reader_finished=#{@exited.get} reader_error="
+          io << (@reader_error.try(&.inspect_with_backtrace) || "none") << '\n'
+          io << "output_idle_ms=#{(monotonic_now - @last_activity).total_milliseconds.round(1)}\n"
+          io << "Screen:\n" << @screen
+        end
+      end
+    end
+
     # Stops the program and releases the PTY. Idempotent.
     def close : Nil
       @pty.close
@@ -181,22 +196,30 @@ module Termisu::Testing
     private def start_reader : Nil
       spawn do
         buf = Bytes.new(8192)
-        begin
-          loop do
-            n = @pty.master.read(buf)
-            break if n == 0 # EOF
-            # Mutate @screen under the same lock the reader-facing helpers read
-            # with, so a multi-threaded runtime never observes a half-applied
-            # grid. feed() is pure CPU (no yield), so the lock is held briefly.
-            @state_lock.synchronize do
-              @screen.feed(buf[0, n])
-              @last_activity = monotonic_now
-            end
-            @started.set(true)
+        loop do
+          n = begin
+            @pty.master.read(buf)
+          rescue error : IO::Error
+            {% if flag?(:linux) %}
+              raise error unless error.os_error == Errno::EIO
+              0 # Linux reports PTY slave hangup as EIO instead of EOF.
+            {% else %}
+              raise error
+            {% end %}
           end
-        rescue IO::Error
-          # master hung up (child exited; Linux raises EIO) — treat as EOF
+          break if n == 0 # EOF
+          # Mutate @screen under the same lock the reader-facing helpers read
+          # with, so a multi-threaded runtime never observes a half-applied
+          # grid. feed() is pure CPU (no yield), so the lock is held briefly.
+          @state_lock.synchronize do
+            @screen.feed(buf[0, n])
+            @last_activity = monotonic_now
+          end
+          @started.set(true)
         end
+      rescue error
+        @state_lock.synchronize { @reader_error = error }
+      ensure
         @exited.set(true)
       end
     end

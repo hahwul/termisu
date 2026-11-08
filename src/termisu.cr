@@ -100,7 +100,11 @@ class Termisu
       lifecycle_log { Log.info { "Initializing Termisu v#{VERSION}" } }
 
       terminal = build_terminal(sync_updates)
-      reader = Reader.new(terminal.infd)
+      reader = {% if flag?(:win32) %}
+                 Reader.new(terminal.infd, output_fd: terminal.outfd)
+               {% else %}
+                 Reader.new(terminal.infd)
+               {% end %}
       input_parser = Input::Parser.new(reader)
 
       lifecycle_log { Log.debug { "Terminal size: #{terminal.size}" } }
@@ -685,9 +689,12 @@ class Termisu
   # is already disabled.
   def disable_timer : self
     if timer = @timer_source
-      @event_loop.remove_source(timer)
-      @timer_source = nil
-      Log.debug { "Timer disabled" }
+      begin
+        @event_loop.remove_source(timer)
+      ensure
+        @timer_source = nil
+      end
+      lifecycle_log { Log.debug { "Timer disabled" } }
     end
 
     self
@@ -767,7 +774,8 @@ class Termisu
 
   # Removes a custom event source from the event loop.
   #
-  # If the source is running, it will be stopped before removal.
+  # Running sources and sources with pending run cleanup are stopped before removal.
+  # Never-started sources are not stopped unless they explicitly require cleanup.
   # Removing a source that isn't registered is a no-op.
   #
   # Parameters:
@@ -862,6 +870,7 @@ class Termisu
 
   # Executes a block with cbreak mode.
   #
+  # Windows raises NotImplementedError because noncanonical echo is unsupported.
   # Cbreak mode provides character-by-character input with echo and
   # signal handling. Useful for interactive prompts within a TUI.
   #
